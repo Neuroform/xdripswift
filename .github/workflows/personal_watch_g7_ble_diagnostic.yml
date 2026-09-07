@@ -40,12 +40,16 @@ jobs:
       - name: Apply G7 Watch BLE diagnostic patch
         run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
 
+      - name: Remove watchOS-incompatible text selection modifier
+        run: sed -i '' '/\.textSelection(.enabled)/d' 'xDrip Watch App/Views/RootView.swift'
+
       - name: Verify diagnostic patch
         run: |
           grep -q 'G7BLEDiagnosticView' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'F8083532-849E-531C-C594-30F1F86A4EA5' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'NSBluetoothAlwaysUsageDescription' 'xDrip-Watch-App-Info.plist'
           grep -q 'WERT ALT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          ! grep -q 'textSelection' 'xDrip Watch App/Views/RootView.swift'
           git diff --check
           echo 'G7 Watch BLE diagnostic patch verified.'
 
