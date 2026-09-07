@@ -2,9 +2,6 @@ name: Personal xDrip Watch Phase 1
 run-name: Personal Watch Phase 1 (${{ github.ref_name }})
 
 on:
-  push:
-    branches:
-      - master
   workflow_dispatch:
 
 jobs:
