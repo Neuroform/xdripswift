@@ -1,0 +1,91 @@
+name: Personal xDrip G7 Watch BLE Diagnostic
+run-name: G7 Watch BLE Diagnostic (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_ble_diagnostic.py'
+      - '.github/workflows/personal_watch_g7_ble_diagnostic.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch BLE diagnostic
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply G7 Watch BLE diagnostic patch
+        run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+
+      - name: Verify diagnostic patch
+        run: |
+          grep -q 'G7BLEDiagnosticView' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'F8083532-849E-531C-C594-30F1F86A4EA5' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'NSBluetoothAlwaysUsageDescription' 'xDrip-Watch-App-Info.plist'
+          grep -q 'WERT ALT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          git diff --check
+          echo 'G7 Watch BLE diagnostic patch verified.'
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d"
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-ble-diagnostic-artifacts
+          path: |
+            artifacts
+            buildlog
