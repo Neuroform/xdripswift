@@ -1,5 +1,5 @@
-name: Personal xDrip G7 Watch BLE Diagnostic
-run-name: G7 Watch BLE Diagnostic (${{ github.ref_name }})
+name: Personal xDrip G7 Watch Direct
+run-name: G7 Watch Direct (${{ github.ref_name }})
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
     secrets: inherit
 
   build:
-    name: Build G7 Watch BLE diagnostic
+    name: Build G7 Watch direct integration
     needs: validate
     runs-on: macos-26
     permissions:
@@ -37,21 +37,23 @@ jobs:
       - name: Apply personal Watch Phase 1 patch
         run: python3 .github/scripts/apply_personal_watch_phase1.py
 
-      - name: Apply G7 Watch BLE diagnostic patch
+      - name: Apply G7 Watch direct integration patch
         run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
 
-      - name: Remove watchOS-incompatible text selection modifier
-        run: sed -i '' '/\.textSelection(.enabled)/d' 'xDrip Watch App/Views/RootView.swift'
-
-      - name: Verify diagnostic patch
+      - name: Verify G7 Watch direct integration
         run: |
-          grep -q 'G7BLEDiagnosticView' 'xDrip Watch App/Views/RootView.swift'
-          grep -q 'F8083532-849E-531C-C594-30F1F86A4EA5' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'G7DirectBLEManager' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'processDirectG7Reading' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q '0x4E' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7DirectStatusView' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'NSBluetoothAlwaysUsageDescription' 'xDrip-Watch-App-Info.plist'
+          grep -q 'UIBackgroundModes' 'xDrip-Watch-App-Info.plist'
+          grep -q 'bluetooth-central' 'xDrip-Watch-App-Info.plist'
+          grep -q 'complicationDataSource' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'dataSource == "G7 BLE"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'WERT ALT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
-          ! grep -q 'textSelection' 'xDrip Watch App/Views/RootView.swift'
           git diff --check
-          echo 'G7 Watch BLE diagnostic patch verified.'
+          echo 'G7 Watch direct integration verified.'
 
       - name: Show local patch diff
         run: git diff --stat
@@ -89,7 +91,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: personal-watch-g7-ble-diagnostic-artifacts
+          name: personal-watch-g7-direct-artifacts
           path: |
             artifacts
             buildlog
