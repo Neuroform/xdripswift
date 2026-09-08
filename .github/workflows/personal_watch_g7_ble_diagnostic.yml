@@ -44,10 +44,25 @@ jobs:
       - name: Apply G7 Watch low-power background hardening
         run: python3 .github/scripts/apply_g7_watch_background_hardening.py
 
+      - name: Fix G7 Direct Swift access level
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('xDrip Watch App/DataModels/WatchStateModel.swift')
+          text = path.read_text()
+          old = '    func setHandlers(\n'
+          new = '    fileprivate func setHandlers(\n'
+          count = text.count(old)
+          if count != 1:
+              raise RuntimeError(f'Expected one G7 setHandlers declaration, found {count}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
       - name: Verify G7 Watch direct integration
         run: |
           grep -q 'G7DirectBLEManager' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'G7DirectBLEManager.shared' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'fileprivate func setHandlers' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'retrievePeripherals(withIdentifiers' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'reconnectImmediately' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'lastAdvertisement' 'xDrip Watch App/DataModels/WatchStateModel.swift'
