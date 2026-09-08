@@ -46,7 +46,7 @@ private struct G7BLEDiagnosticView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                Text("G7 BLE Test")
+                Text("G7 GATT Test")
                     .font(.headline)
 
                 Text("Nur Diagnose – keine Sensorbefehle")
@@ -65,15 +65,34 @@ private struct G7BLEDiagnosticView: View {
                 }
 
                 diagnosticRow("G7 Service", diagnostic.g7ServiceFound ? "gefunden" : "—")
-                diagnosticRow("Auth Char", diagnostic.authCharacteristicFound ? "gefunden" : "—")
-                diagnosticRow("Control Char", diagnostic.controlCharacteristicFound ? "gefunden" : "—")
-                diagnosticRow("Backfill Char", diagnostic.backfillCharacteristicFound ? "gefunden" : "—")
 
-                if diagnostic.connectionSucceeded {
-                    Text(diagnostic.g7ServiceFound ? "BLE/GATT erreichbar" : "BLE verbunden, G7-Service nicht gefunden")
+                if !diagnostic.characteristics.isEmpty {
+                    Divider()
+                    Text("Characteristics")
                         .font(.caption)
                         .fontWeight(.semibold)
-                        .foregroundStyle(diagnostic.g7ServiceFound ? .green : .orange)
+
+                    ForEach(diagnostic.characteristics) { characteristic in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(characteristic.shortUUID)
+                                .font(.system(.caption2, design: .monospaced))
+                                .fontWeight(.semibold)
+                            Text(characteristic.properties)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text(characteristic.fullUUID)
+                                .font(.system(size: 8, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+
+                if diagnostic.discoveryComplete {
+                    Text("GATT-Struktur vollständig gelesen")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.green)
                 }
 
                 Button(diagnostic.isRunning ? "Test läuft…" : "Test starten") {
@@ -87,7 +106,7 @@ private struct G7BLEDiagnosticView: View {
                     }
                 }
 
-                Text("Der Test scannt nach G7, versucht eine BLE-Verbindung und liest nur Service-/Characteristic-Metadaten. Es werden keine Pairing-, Start-, Stop-, Kalibrierungs- oder Glukosebefehle gesendet.")
+                Text("Der Test scannt nach G7, verbindet sich und liest ausschließlich Service-/Characteristic-Metadaten einschließlich Read/Write/Notify/Indicate-Eigenschaften. Keine Characteristic wird gelesen, beschrieben oder abonniert.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -104,27 +123,28 @@ private struct G7BLEDiagnosticView: View {
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.caption)
-                .textSelection(.enabled)
         }
     }
+}
+
+private struct G7CharacteristicDiagnostic: Identifiable {
+    let id: String
+    let fullUUID: String
+    let shortUUID: String
+    let properties: String
 }
 
 private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private let advertisementUUID = CBUUID(string: "FEBC")
     private let g7ServiceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
-    private let communicationUUID = CBUUID(string: "F8083533-849E-531C-C594-30F1F86A4EA5")
-    private let controlUUID = CBUUID(string: "F8083534-849E-531C-C594-30F1F86A4EA5")
-    private let authenticationUUID = CBUUID(string: "F8083535-849E-531C-C594-30F1F86A4EA5")
-    private let backfillUUID = CBUUID(string: "F8083536-849E-531C-C594-30F1F86A4EA5")
 
     @Published var bluetoothState = "initialisiert"
     @Published var status = "bereit"
     @Published var deviceName = ""
     @Published var rssi: Int?
     @Published var g7ServiceFound = false
-    @Published var authCharacteristicFound = false
-    @Published var controlCharacteristicFound = false
-    @Published var backfillCharacteristicFound = false
+    @Published var characteristics: [G7CharacteristicDiagnostic] = []
+    @Published var discoveryComplete = false
     @Published var connectionSucceeded = false
     @Published var isRunning = false
 
@@ -148,10 +168,10 @@ private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralM
 
         let task = DispatchWorkItem { [weak self] in
             guard let self, self.isRunning else { return }
-            self.stopTest(reason: self.connectionSucceeded ? "Test beendet" : "Timeout – kein nutzbarer G7 gefunden")
+            self.stopTest(reason: self.discoveryComplete ? "Test beendet" : "Timeout – Diagnose unvollständig")
         }
         timeoutTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 35, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: task)
     }
 
     func stopTest(reason: String) {
@@ -175,9 +195,8 @@ private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralM
         deviceName = ""
         rssi = nil
         g7ServiceFound = false
-        authCharacteristicFound = false
-        controlCharacteristicFound = false
-        backfillCharacteristicFound = false
+        characteristics = []
+        discoveryComplete = false
         connectionSucceeded = false
     }
 
@@ -185,8 +204,6 @@ private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralM
         bluetoothState = "ein"
         status = "suche G7…"
 
-        // First ask iOS/watchOS whether a peripheral exposing the native G7 service is already
-        // connected at system level (for example by another app). If not, scan advertisements.
         let connected = central.retrieveConnectedPeripherals(withServices: [g7ServiceUUID])
         if let peripheral = connected.first(where: { ($0.name ?? "").hasPrefix("DX") }) ?? connected.first {
             inspect(peripheral: peripheral, rssi: nil, source: "bereits systemweit verbunden")
@@ -254,7 +271,7 @@ private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralM
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        if isRunning, !g7ServiceFound {
+        if isRunning, !discoveryComplete {
             targetPeripheral = nil
             status = "getrennt; suche weiter…"
             central.scanForPeripherals(withServices: [advertisementUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
@@ -273,8 +290,8 @@ private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralM
         }
 
         g7ServiceFound = true
-        status = "G7-Service gefunden; prüfe Characteristics…"
-        peripheral.discoverCharacteristics([communicationUUID, controlUUID, authenticationUUID, backfillUUID], for: service)
+        status = "G7-Service gefunden; lese alle Characteristics…"
+        peripheral.discoverCharacteristics(nil, for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -283,14 +300,42 @@ private final class G7BLEDiagnosticModel: NSObject, ObservableObject, CBCentralM
             return
         }
 
-        let characteristics = service.characteristics ?? []
-        authCharacteristicFound = characteristics.contains(where: { $0.uuid == authenticationUUID })
-        controlCharacteristicFound = characteristics.contains(where: { $0.uuid == controlUUID })
-        backfillCharacteristicFound = characteristics.contains(where: { $0.uuid == backfillUUID })
-        let communicationFound = characteristics.contains(where: { $0.uuid == communicationUUID })
+        let rows = (service.characteristics ?? []).map { characteristic in
+            G7CharacteristicDiagnostic(
+                id: characteristic.uuid.uuidString,
+                fullUUID: characteristic.uuid.uuidString,
+                shortUUID: self.shortUUID(characteristic.uuid.uuidString),
+                properties: self.describe(characteristic.properties)
+            )
+        }
+        .sorted { $0.fullUUID < $1.fullUUID }
 
-        let essential = authCharacteristicFound && controlCharacteristicFound && communicationFound
-        stopTest(reason: essential ? "Erfolg: G7 BLE/GATT direkt erreichbar" : "G7-Service erreichbar, Characteristics unvollständig")
+        characteristics = rows
+        discoveryComplete = true
+        stopTest(reason: "Erfolg: \\(rows.count) Characteristics gefunden")
+    }
+
+    private func shortUUID(_ uuid: String) -> String {
+        let upper = uuid.uppercased()
+        if upper.hasPrefix("F80835"), let first = upper.split(separator: "-").first {
+            return String(first)
+        }
+        return upper
+    }
+
+    private func describe(_ properties: CBCharacteristicProperties) -> String {
+        var values: [String] = []
+        if properties.contains(.read) { values.append("R") }
+        if properties.contains(.write) { values.append("W") }
+        if properties.contains(.writeWithoutResponse) { values.append("WNR") }
+        if properties.contains(.notify) { values.append("N") }
+        if properties.contains(.indicate) { values.append("I") }
+        if properties.contains(.broadcast) { values.append("B") }
+        if properties.contains(.authenticatedSignedWrites) { values.append("ASW") }
+        if properties.contains(.extendedProperties) { values.append("EXT") }
+        if properties.contains(.notifyEncryptionRequired) { values.append("N-ENC") }
+        if properties.contains(.indicateEncryptionRequired) { values.append("I-ENC") }
+        return values.isEmpty ? "keine Properties" : values.joined(separator: " | ")
     }
 }
 ''',
@@ -308,4 +353,4 @@ if "NSBluetoothAlwaysUsageDescription" not in plist_text:
     )
 plist.write_text(plist_text)
 
-print("G7 Watch BLE diagnostic patch applied successfully.")
+print("Extended G7 Watch GATT diagnostic patch applied successfully.")
