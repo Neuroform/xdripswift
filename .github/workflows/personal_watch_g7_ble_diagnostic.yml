@@ -7,6 +7,7 @@ on:
       - master
     paths:
       - '.github/scripts/apply_g7_watch_ble_diagnostic.py'
+      - '.github/scripts/apply_g7_watch_background_hardening.py'
       - '.github/workflows/personal_watch_g7_ble_diagnostic.yml'
   workflow_dispatch:
 
@@ -40,12 +41,24 @@ jobs:
       - name: Apply G7 Watch direct integration patch
         run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
 
+      - name: Apply G7 Watch low-power background hardening
+        run: python3 .github/scripts/apply_g7_watch_background_hardening.py
+
       - name: Verify G7 Watch direct integration
         run: |
           grep -q 'G7DirectBLEManager' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7DirectBLEManager.shared' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'retrievePeripherals(withIdentifiers' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'reconnectImmediately' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'lastAdvertisement' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'lastWidgetWrite' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          ! grep -q 'scheduleReconnect()' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          ! grep -q 'armAuthenticationTimeout' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7DirectBLEManager.shared.start()' 'xDrip Watch App/xDripWatchApp.swift'
           grep -q 'processDirectG7Reading' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q '0x4E' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'G7DirectStatusView' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'Background-Diagnose' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'NSBluetoothAlwaysUsageDescription' 'xDrip-Watch-App-Info.plist'
           grep -q 'UIBackgroundModes' 'xDrip-Watch-App-Info.plist'
           grep -q 'bluetooth-central' 'xDrip-Watch-App-Info.plist'
@@ -53,7 +66,7 @@ jobs:
           grep -q 'dataSource == "G7 BLE"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'WERT ALT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           git diff --check
-          echo 'G7 Watch direct integration verified.'
+          echo 'G7 Watch direct low-power/background integration verified.'
 
       - name: Show local patch diff
         run: git diff --stat
