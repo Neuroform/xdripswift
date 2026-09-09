@@ -1,5 +1,5 @@
-name: Personal xDrip G7 Watch Build 13
-run-name: G7 Watch Build 13 Notify Listener (${{ github.ref_name }})
+name: Personal xDrip G7 Watch Build 14
+run-name: G7 Watch Build 14 Passive BG Decoder (${{ github.ref_name }})
 
 on:
   push:
@@ -12,6 +12,7 @@ on:
       - '.github/scripts/apply_g7_watch_build11_discovery.py'
       - '.github/scripts/apply_g7_watch_build12_multiwindow.py'
       - '.github/scripts/apply_g7_watch_build13_notify_listener.py'
+      - '.github/scripts/apply_g7_watch_build14_passive_decoder.py'
       - '.github/workflows/personal_watch_g7_ble_diagnostic.yml'
   workflow_dispatch:
 
@@ -22,7 +23,7 @@ jobs:
     secrets: inherit
 
   build:
-    name: Build G7 Watch Build 13
+    name: Build G7 Watch Build 14
     needs: validate
     runs-on: macos-26
     permissions:
@@ -60,22 +61,24 @@ jobs:
       - name: Apply Build 13 name-independent Notify listener
         run: python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
 
-      - name: Verify Build 13 name-independent Notify listener
+      - name: Apply Build 14 passive BG decoder
+        run: python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+
+      - name: Verify Build 14 passive decoder and Dexcom safety
         run: |
           grep -q 'G7AuthProbeManager' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'g7AuthProbeTelemetry' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'directG7Manager = nil' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'testWindowSeconds: TimeInterval = 600' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'minStableConnectionSeconds: TimeInterval = 0.25' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'CBCentralManagerScanOptionAllowDuplicatesKey: true' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'MATCH=FEBC · Name nur Anzeige' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'G7-FINGERPRINT: \\(expectedFound.count)/4 erwartete Channels' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'setNotifyValue(true, for: characteristic)' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'didUpdateNotificationStateFor characteristic' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'didUpdateValueFor characteristic' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'ERSTER SPONTAN-RX' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'Build 13 Notify Listener · name-unabhängig' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'private func passivePacketSummary' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'data\[0\] == 0x4E' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'PASSIV-BG %d mg/dL' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'latestPassiveBGSummary' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Build 14 Passive BG Decoder · kein Dexcom-TX' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'KEIN AKTUELLER WERT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'Text("---")' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'hasRecentReading && entry.widgetState.dataSource == "G7 BLE"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
@@ -101,7 +104,12 @@ jobs:
               'setNotifyValue(true, for: characteristic)',
               'didUpdateNotificationStateFor characteristic',
               'didUpdateValueFor characteristic',
-              'ERSTER SPONTAN-RX',
+              'passivePacketSummary',
+              'data[0] == 0x4E',
+              'littleEndianUInt32(data, offset: 2)',
+              'littleEndianUInt16(data, offset: 12)',
+              'PASSIV-BG',
+              'latestPassiveBGSummary',
               'Dexcom-TX 0',
           ]
           forbidden = [
@@ -113,13 +121,13 @@ jobs:
               'TX F8083535',
           ]
           for token in required:
-              assert token in probe, f'missing Build 13 token: {token}'
+              assert token in probe, f'missing Build 14 token: {token}'
           for token in forbidden:
-              assert token not in probe, f'Build 13 forbidden token found: {token}'
-          print('Build 13 verified: FEBC/GATT name-independent match, CCCD Notify only, no Dexcom application TX.')
+              assert token not in probe, f'Build 14 forbidden token found: {token}'
+          print('Build 14 verified: name-independent passive 0x4E decoding, CCCD Notify only, no Dexcom application TX.')
           PY
           git diff --check
-          echo 'Build 13 name-independent Notify listener and stale BG safety verified.'
+          echo 'Build 14 passive decoder and stale BG safety verified.'
 
       - name: Show local patch diff
         run: git diff --stat
@@ -157,7 +165,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: personal-watch-g7-build13-artifacts
+          name: personal-watch-g7-build14-artifacts
           path: |
             artifacts
             buildlog
