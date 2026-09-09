@@ -1,5 +1,5 @@
-name: Personal xDrip G7 Watch Build 12
-run-name: G7 Watch Build 12 Multi-Window GATT (${{ github.ref_name }})
+name: Personal xDrip G7 Watch Build 13
+run-name: G7 Watch Build 13 Notify Listener (${{ github.ref_name }})
 
 on:
   push:
@@ -11,6 +11,7 @@ on:
       - '.github/scripts/apply_g7_watch_auth_telemetry.py'
       - '.github/scripts/apply_g7_watch_build11_discovery.py'
       - '.github/scripts/apply_g7_watch_build12_multiwindow.py'
+      - '.github/scripts/apply_g7_watch_build13_notify_listener.py'
       - '.github/workflows/personal_watch_g7_ble_diagnostic.yml'
   workflow_dispatch:
 
@@ -21,7 +22,7 @@ jobs:
     secrets: inherit
 
   build:
-    name: Build G7 Watch Build 12
+    name: Build G7 Watch Build 13
     needs: validate
     runs-on: macos-26
     permissions:
@@ -56,7 +57,10 @@ jobs:
       - name: Apply Build 12 multi-window connection/GATT probe
         run: python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
 
-      - name: Verify passive Build 12 multi-window probe
+      - name: Apply Build 13 name-independent Notify listener
+        run: python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+
+      - name: Verify Build 13 name-independent Notify listener
         run: |
           grep -q 'G7AuthProbeManager' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'g7AuthProbeTelemetry' 'xDrip Watch App/DataModels/WatchStateModel.swift'
@@ -64,12 +68,14 @@ jobs:
           grep -q 'testWindowSeconds: TimeInterval = 600' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'minStableConnectionSeconds: TimeInterval = 0.25' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'CBCentralManagerScanOptionAllowDuplicatesKey: true' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'Connection ≥250 ms · discoverServices 3532' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'discoverCharacteristics(nil, for: service)' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'PASSIV-GATT erfolgreich · KEIN Notify · KEIN TX' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'DISCONNECT #' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'RETRY in 3 s' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'Build 12 Multi-Window GATT · 10-Min-Fenster' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'MATCH=FEBC · Name nur Anzeige' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7-FINGERPRINT: \\(expectedFound.count)/4 erwartete Channels' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'setNotifyValue(true, for: characteristic)' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'didUpdateNotificationStateFor characteristic' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'didUpdateValueFor characteristic' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'ERSTER SPONTAN-RX' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Build 13 Notify Listener · name-unabhängig' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'KEIN AKTUELLER WERT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'Text("---")' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'hasRecentReading && entry.widgetState.dataSource == "G7 BLE"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
@@ -86,29 +92,34 @@ jobs:
           end = text.index('// MARK: - Direct G7 BLE manager', start)
           probe = text[start:end]
           required = [
-              'testWindowSeconds: TimeInterval = 600',
-              'minStableConnectionSeconds: TimeInterval = 0.25',
+              'scanForPeripherals(',
+              'withServices: [advertisementUUID]',
+              'MATCH=FEBC · Name nur Anzeige',
               'discoverServices([self.serviceUUID])',
               'discoverCharacteristics(nil, for: service)',
-              'scheduleRetry("Remote-Disconnect nach',
-              'PASSIV-GATT erfolgreich · KEIN Notify · KEIN TX',
+              'G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant',
+              'setNotifyValue(true, for: characteristic)',
+              'didUpdateNotificationStateFor characteristic',
+              'didUpdateValueFor characteristic',
+              'ERSTER SPONTAN-RX',
+              'Dexcom-TX 0',
           ]
           forbidden = [
+              'guard name.hasPrefix',
               'writeValue(',
-              'setNotifyValue(',
               'sendInitialAuthRequest',
               'authRequestSent',
               'packet.append(0x02)',
               'TX F8083535',
           ]
           for token in required:
-              assert token in probe, f'missing Build 12 token: {token}'
+              assert token in probe, f'missing Build 13 token: {token}'
           for token in forbidden:
-              assert token not in probe, f'Build 12 must stay passive; found: {token}'
-          print('Build 12 probe block is passive: no Notify, no Write, no Dexcom auth TX.')
+              assert token not in probe, f'Build 13 forbidden token found: {token}'
+          print('Build 13 verified: FEBC/GATT name-independent match, CCCD Notify only, no Dexcom application TX.')
           PY
           git diff --check
-          echo 'Build 12 10-minute multi-window GATT probe and stale BG safety verified.'
+          echo 'Build 13 name-independent Notify listener and stale BG safety verified.'
 
       - name: Show local patch diff
         run: git diff --stat
@@ -146,7 +157,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: personal-watch-g7-build12-artifacts
+          name: personal-watch-g7-build13-artifacts
           path: |
             artifacts
             buildlog
