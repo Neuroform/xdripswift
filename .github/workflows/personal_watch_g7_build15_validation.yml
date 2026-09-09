@@ -1,0 +1,181 @@
+name: Personal xDrip G7 Watch Build 15
+run-name: G7 Watch Build 15 Multi-Cycle Validation (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_ble_diagnostic.py'
+      - '.github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py'
+      - '.github/scripts/apply_g7_watch_auth_telemetry.py'
+      - '.github/scripts/apply_g7_watch_build11_discovery.py'
+      - '.github/scripts/apply_g7_watch_build12_multiwindow.py'
+      - '.github/scripts/apply_g7_watch_build13_notify_listener.py'
+      - '.github/scripts/apply_g7_watch_build14_passive_decoder.py'
+      - '.github/scripts/apply_g7_watch_build15_multicycle_validation.py'
+      - '.github/workflows/personal_watch_g7_build15_validation.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 15
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Check Build 15 patch syntax
+        run: python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply Build 7 G7 direct baseline
+        run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+
+      - name: Apply manual G7 auth probe and stale BG safety
+        run: python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+
+      - name: Apply G7 auth disconnect telemetry
+        run: python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+
+      - name: Apply Build 11 six-minute G7 discovery
+        run: python3 .github/scripts/apply_g7_watch_build11_discovery.py
+
+      - name: Apply Build 12 multi-window connection/GATT probe
+        run: python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+
+      - name: Apply Build 13 name-independent Notify listener
+        run: python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+
+      - name: Apply Build 14 passive BG decoder
+        run: python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+
+      - name: Apply Build 15 multi-cycle validation
+        run: python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Verify Build 15 multi-cycle validation and Dexcom safety
+        run: |
+          grep -q 'testWindowSeconds: TimeInterval = 2700' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'targetConsecutiveBGReadings = 6' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'recordPassiveBGPacket' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'capturedBGSequences' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'consecutiveBGRun' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'longestConsecutiveBGRun' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Build15 BESTÄTIGT' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Remote-Disconnect nach RX' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'MATCH=FEBC · Name nur Anzeige' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'setNotifyValue(true, for: characteristic)' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'data\[0\] == 0x4E' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'PASSIV-BG %d mg/dL' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Build 15 Multi-Cycle Validation · 6 direkte BG' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'KEIN AKTUELLER WERT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'Text("---")' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'hasRecentReading && entry.widgetState.dataSource == "G7 BLE"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'NSBluetoothAlwaysUsageDescription' 'xDrip-Watch-App-Info.plist'
+          ! grep -q 'CBCentralManagerOptionRestoreIdentifierKey' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          ! grep -q '<string>bluetooth-central</string>' 'xDrip-Watch-App-Info.plist'
+          ! grep -q 'WERT ALT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text()
+          start = text.index('// MARK: - Manual G7 authentication probe')
+          end = text.index('// MARK: - Direct G7 BLE manager', start)
+          probe = text[start:end]
+          required = [
+              'scanForPeripherals(',
+              'withServices: [advertisementUUID]',
+              'MATCH=FEBC · Name nur Anzeige',
+              'discoverServices([self.serviceUUID])',
+              'discoverCharacteristics(nil, for: service)',
+              'G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant',
+              'setNotifyValue(true, for: characteristic)',
+              'didUpdateNotificationStateFor characteristic',
+              'didUpdateValueFor characteristic',
+              'passivePacketSummary',
+              'data[0] == 0x4E',
+              'littleEndianUInt16(data, offset: 12)',
+              'recordPassiveBGPacket',
+              'capturedBGSequences',
+              'targetConsecutiveBGReadings = 6',
+              'testWindowSeconds: TimeInterval = 2700',
+              'Build15 BESTÄTIGT',
+              'Dexcom-TX 0',
+          ]
+          forbidden = [
+              'guard name.hasPrefix',
+              'writeValue(',
+              'sendInitialAuthRequest',
+              'authRequestSent',
+              'packet.append(0x02)',
+              'TX F8083535',
+          ]
+          for token in required:
+              assert token in probe, f'missing Build 15 token: {token}'
+          for token in forbidden:
+              assert token not in probe, f'Build 15 forbidden token found: {token}'
+          assert 'recordPassiveBGPacket(data)' in probe
+          assert 'retry: true' in probe
+          print('Build 15 verified: 45-minute multi-cycle passive 0x4E validation, 6-sequence target, CCCD Notify only, no Dexcom application TX.')
+          PY
+          git diff --check
+          echo 'Build 15 multi-cycle validation and stale BG safety verified.'
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d"
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build15-artifacts
+          path: |
+            artifacts
+            buildlog
