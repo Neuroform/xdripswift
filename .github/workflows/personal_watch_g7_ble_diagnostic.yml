@@ -1,5 +1,5 @@
-name: Personal xDrip G7 Watch Auth Probe
-run-name: G7 Watch Auth Probe (${{ github.ref_name }})
+name: Personal xDrip G7 Watch Auth Telemetry
+run-name: G7 Watch Auth Telemetry (${{ github.ref_name }})
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
     paths:
       - '.github/scripts/apply_g7_watch_ble_diagnostic.py'
       - '.github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py'
+      - '.github/scripts/apply_g7_watch_auth_telemetry.py'
       - '.github/workflows/personal_watch_g7_ble_diagnostic.yml'
   workflow_dispatch:
 
@@ -18,7 +19,7 @@ jobs:
     secrets: inherit
 
   build:
-    name: Build G7 Watch auth probe
+    name: Build G7 Watch auth telemetry
     needs: validate
     runs-on: macos-26
     permissions:
@@ -44,16 +45,24 @@ jobs:
       - name: Apply manual G7 auth probe and stale BG safety
         run: python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
 
-      - name: Verify conservative auth-probe build
+      - name: Apply G7 auth disconnect telemetry
+        run: python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+
+      - name: Verify conservative auth telemetry build
         run: |
           grep -q 'G7AuthProbeManager' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'startG7AuthProbe' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'g7AuthProbeTelemetry' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'directG7Manager = nil' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'packet.append(0x02)' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q '0x03 Challenge erhalten' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q '0x03 Challenge erkannt · NUR protokolliert · KEINE Antwort' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'LOCAL CANCEL angefordert: JA' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'DISCONNECT source=' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'TX→Disconnect:' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'TX→ACK' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'channelUUIDs' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'protectedPeripheralIDs' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -q 'retrieveConnectedPeripherals(withServices' 'xDrip Watch App/DataModels/WatchStateModel.swift'
-          grep -q 'Auth-Probe starten' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'Build 10 Auth-Telemetrie' 'xDrip Watch App/Views/RootView.swift'
           grep -q 'KEIN AKTUELLER WERT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'Text("---")' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'hasRecentReading && entry.widgetState.dataSource == "G7 BLE"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
@@ -66,7 +75,7 @@ jobs:
           ! grep -q '<string>bluetooth-central</string>' 'xDrip-Watch-App-Info.plist'
           ! grep -q 'WERT ALT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           git diff --check
-          echo 'Conservative manual G7 auth probe and stale BG safety verified.'
+          echo 'Conservative G7 auth telemetry and stale BG safety verified.'
 
       - name: Show local patch diff
         run: git diff --stat
@@ -104,7 +113,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: personal-watch-g7-auth-probe-artifacts
+          name: personal-watch-g7-auth-telemetry-artifacts
           path: |
             artifacts
             buildlog
