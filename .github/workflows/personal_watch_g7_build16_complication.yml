@@ -1,0 +1,153 @@
+name: Personal xDrip G7 Watch Build 16
+run-name: G7 Watch Build 16 Rolling Home Complication (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_build16_complication_refresh.py'
+      - '.github/workflows/personal_watch_g7_build16_complication.yml'
+      - '.github/triggers/build16.trigger'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 16
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Check Build 15 and Build 16 patch syntax
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_complication_refresh.py
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply Build 7 G7 direct baseline
+        run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+
+      - name: Apply manual G7 auth probe and stale BG safety
+        run: python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+
+      - name: Apply G7 auth disconnect telemetry
+        run: python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+
+      - name: Apply Build 11 six-minute G7 discovery
+        run: python3 .github/scripts/apply_g7_watch_build11_discovery.py
+
+      - name: Apply Build 12 multi-window connection/GATT probe
+        run: python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+
+      - name: Apply Build 13 name-independent Notify listener
+        run: python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+
+      - name: Apply Build 14 passive BG decoder
+        run: python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+
+      - name: Apply Build 15 multi-cycle validation
+        run: python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Verify Build 15 baseline before UI/update changes
+        run: |
+          grep -q 'testWindowSeconds: TimeInterval = 2700' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'targetConsecutiveBGReadings = 6' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'recordPassiveBGPacket' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Build15 BESTÄTIGT' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'MATCH=FEBC · Name nur Anzeige' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'setNotifyValue(true, for: characteristic)' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'data\[0\] == 0x4E' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'PASSIV-BG %d mg/dL' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'Build 15 Multi-Cycle Validation · 6 direkte BG' 'xDrip Watch App/Views/RootView.swift'
+          grep -q 'KEIN AKTUELLER WERT' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'NSBluetoothAlwaysUsageDescription' 'xDrip-Watch-App-Info.plist'
+          ! grep -q 'CBCentralManagerOptionRestoreIdentifierKey' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          ! grep -q '<string>bluetooth-central</string>' 'xDrip-Watch-App-Info.plist'
+          echo 'Build 15 baseline verified.'
+
+      - name: Apply Build 16 rolling home complication and update logic
+        run: python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+
+      - name: Verify Build 16 home-screen complication architecture
+        run: |
+          grep -q 'timelineStep: TimeInterval = 5 \* 60' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'staleAfter: TimeInterval = 12 \* 60' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'policy: .atEnd' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          ! grep -q 'policy: .never' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'latestReadingDate.addingTimeInterval(staleAfter)' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'RollingTwoHourGlucoseGraph' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'maximumMgDl = 220.0' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'visibleDuration: TimeInterval = 2 \* 60 \* 60' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'let currentTimeX = plotRight' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'There is deliberately NO vertical line on the left edge' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'return "---"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'return "--"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          ! grep -q 'GlucoseChartCompactView' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          ! grep -q 'xDrip Watch App/Views' '.github/scripts/apply_g7_watch_build16_complication_refresh.py'
+          grep -q 'Date().addingTimeInterval(-60 \* 12)' 'xDrip Watch Complication/XDripWatchComplication+Entry.swift'
+          grep -q 'WidgetCenter.shared.reloadTimelines(ofKind: "xDripWatchComplication")' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'stateChanged || sourceChanged' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'sharedUserDefaults.data(forKey: stateKey) != stateData' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git diff --check
+          echo 'Build 16 verified: rolling 2h home complication, right-side now line/current BG, 12-minute autonomous stale transition, targeted deduplicated reload.'
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d"
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build16-artifacts
+          path: |
+            artifacts
+            buildlog
