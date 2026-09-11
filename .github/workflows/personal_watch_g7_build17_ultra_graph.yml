@@ -1,0 +1,152 @@
+name: Personal xDrip G7 Watch Build 17
+run-name: G7 Watch Build 17 Ultra Maximum Graph (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_build16_complication_refresh.py'
+      - '.github/scripts/apply_g7_watch_build16_compile_fixes.py'
+      - '.github/scripts/apply_g7_watch_build17_ultra_graph_layout.py'
+      - '.github/workflows/personal_watch_g7_build17_ultra_graph.yml'
+      - '.github/triggers/build17.trigger'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 17
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Check Build 15 through Build 17 patch syntax
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build17_ultra_graph_layout.py
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply Build 7 G7 direct baseline
+        run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+
+      - name: Apply manual G7 auth probe and stale BG safety
+        run: python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+
+      - name: Apply G7 auth disconnect telemetry
+        run: python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+
+      - name: Apply Build 11 six-minute G7 discovery
+        run: python3 .github/scripts/apply_g7_watch_build11_discovery.py
+
+      - name: Apply Build 12 multi-window connection/GATT probe
+        run: python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+
+      - name: Apply Build 13 name-independent Notify listener
+        run: python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+
+      - name: Apply Build 14 passive BG decoder
+        run: python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+
+      - name: Apply Build 15 multi-cycle validation
+        run: python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply Build 16 rolling home complication and update logic
+        run: |
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
+
+      - name: Verify Build 16 update logic before layout-only Build 17
+        run: |
+          grep -q 'timelineStep: TimeInterval = 5 \* 60' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'staleAfter: TimeInterval = 12 \* 60' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'policy: .atEnd' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          ! grep -q 'policy: .never' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -q 'WidgetCenter.shared.reloadTimelines(ofKind: "xDripWatchComplication")' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'stateChanged || sourceChanged' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -q 'maximumMgDl = 220.0' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'visibleDuration: TimeInterval = 2 \* 60 \* 60' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'let currentTimeX = plotRight' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          echo 'Build 16 update/stale baseline verified.'
+
+      - name: Apply Build 17 Watch Ultra maximum graph layout
+        run: python3 .github/scripts/apply_g7_watch_build17_ultra_graph_layout.py
+
+      - name: Verify Build 17 home-screen layout
+        run: |
+          FILE='xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q 'geometry.size.width \* 0.21' "$FILE"
+          grep -q 'HStack(alignment: .center, spacing: 1.5)' "$FILE"
+          grep -q 'trend arrow is' "$FILE"
+          grep -q 'HStack(alignment: .firstTextBaseline, spacing: 2)' "$FILE"
+          grep -q 'size: entry.widgetState.isSmallScreen() ? 9 : 11' "$FILE"
+          grep -q 'leftMargin: CGFloat = size.width < 115 ? 16 : 18' "$FILE"
+          grep -q 'rightMargin: CGFloat = 0.5' "$FILE"
+          grep -q 'topMargin: CGFloat = 0.5' "$FILE"
+          grep -q 'maximumMgDl = 220.0' "$FILE"
+          grep -q 'visibleDuration: TimeInterval = 2 \* 60 \* 60' "$FILE"
+          grep -q 'let currentTimeX = plotRight' "$FILE"
+          ! grep -q 'xDrip Watch App/Views' '.github/scripts/apply_g7_watch_build17_ultra_graph_layout.py'
+          git diff --check
+          echo 'Build 17 verified: larger 2h graph, narrower value column, BG gets full row, smaller trend beside delta, right-side current-time line retained.'
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d"
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build17-artifacts
+          path: |
+            artifacts
+            buildlog
