@@ -7,6 +7,7 @@ on:
       - master
     paths:
       - '.github/scripts/apply_g7_watch_build16_complication_refresh.py'
+      - '.github/scripts/apply_g7_watch_build16_compile_fixes.py'
       - '.github/workflows/personal_watch_g7_build16_complication.yml'
       - '.github/triggers/build16.trigger'
   workflow_dispatch:
@@ -39,6 +40,7 @@ jobs:
         run: |
           python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
           python3 -m py_compile .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_compile_fixes.py
 
       - name: Apply personal Watch Phase 1 patch
         run: python3 .github/scripts/apply_personal_watch_phase1.py
@@ -86,7 +88,9 @@ jobs:
           echo 'Build 15 baseline verified.'
 
       - name: Apply Build 16 rolling home complication and update logic
-        run: python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+        run: |
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
 
       - name: Verify Build 16 home-screen complication architecture
         run: |
@@ -102,6 +106,7 @@ jobs:
           grep -q 'There is deliberately NO vertical line on the left edge' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'return "---"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -q 'return "--"' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -q '.frame(width: sideWidth)' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           ! grep -q 'GlucoseChartCompactView' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           ! grep -q 'xDrip Watch App/Views' '.github/scripts/apply_g7_watch_build16_complication_refresh.py'
           grep -q 'Date().addingTimeInterval(-60 \* 12)' 'xDrip Watch Complication/XDripWatchComplication+Entry.swift'
