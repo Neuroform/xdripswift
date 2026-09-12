@@ -1,5 +1,5 @@
 name: Personal xDrip G7 Watch Build 21
-run-name: G7 Watch Build 21 Single Configurable Complication (${{ github.ref_name }})
+run-name: G7 Watch Build 21 Registration + Large Axis Labels (${{ github.ref_name }})
 
 on:
   push:
@@ -74,6 +74,33 @@ jobs:
       - name: Apply Build 21 registration recovery
         run: python3 .github/scripts/apply_g7_watch_build21_single_configurable_complication.py
 
+      - name: Enlarge graph time and BG axis labels
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = {
+              'let labelFontSize: CGFloat = size.width >= 150 ? 9.0 : 8.2':
+                  'let labelFontSize: CGFloat = size.width >= 150 ? 11.0 : 10.0',
+              'let leftMargin: CGFloat = size.width >= 150 ? 24.0 : 22.0':
+                  'let leftMargin: CGFloat = size.width >= 150 ? 28.0 : 25.0',
+              'let bottomMargin: CGFloat = 17.0':
+                  'let bottomMargin: CGFloat = 19.0',
+          }
+
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'Axis label patch expected one match for {old!r}, found {count}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          print('Graph axis labels enlarged: 11 pt on Ultra, 10 pt fallback; margins adjusted to avoid clipping.')
+          PY
+
       - name: Verify Build 21 source architecture
         run: |
           python3 - <<'PY'
@@ -98,9 +125,11 @@ jobs:
           grep -Fq 'private let staleAfter: TimeInterval = 12 * 60' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
           grep -Fq 'WidgetCenter.shared.reloadTimelines(ofKind: "xDripWatchComplication")' 'xDrip Watch App/DataModels/WatchStateModel.swift'
           grep -Fq 'private let visibleDuration: TimeInterval = 2 * 60 * 60' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -Fq 'let labelFontSize: CGFloat = size.width >= 150 ? 11.0 : 10.0' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -Fq 'let leftMargin: CGFloat = size.width >= 150 ? 28.0 : 25.0' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
           grep -Fq 'INFOPLIST_KEY_CFBundleDisplayName = xDrip;' xdrip.xcodeproj/project.pbxproj
           git diff --check
-          echo 'Build 21 source architecture verified.'
+          echo 'Build 21 source architecture and enlarged graph labels verified.'
 
       - name: Show local patch diff
         run: git diff --stat
