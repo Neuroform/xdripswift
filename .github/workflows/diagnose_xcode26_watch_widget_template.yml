@@ -1,0 +1,29 @@
+name: Diagnose Xcode 26 Watch Widget Template
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - '.github/workflows/diagnose_xcode26_watch_widget_template.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: macos-26
+    steps:
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+      - name: Inspect current Xcode templates for WidgetKit watch metadata
+        shell: bash
+        run: |
+          set -euxo pipefail
+          XCODE=/Applications/Xcode_26.2.app
+          echo '--- matching files: com.apple.widgetkit-extension ---'
+          grep -RIl --exclude='*.png' --exclude='*.pdf' 'com.apple.widgetkit-extension' "$XCODE/Contents/Developer/Library/Xcode/Templates" 2>/dev/null | head -80 || true
+          echo '--- matching files: WKAppBundleIdentifier ---'
+          grep -RIl --exclude='*.png' --exclude='*.pdf' 'WKAppBundleIdentifier' "$XCODE/Contents/Developer/Library/Xcode/Templates" 2>/dev/null | head -80 || true
+          echo '--- contextual matches ---'
+          while IFS= read -r f; do
+            echo "===== $f ====="
+            grep -n -B 12 -A 20 -E 'com.apple.widgetkit-extension|WKAppBundleIdentifier|productType|PRODUCT_BUNDLE_IDENTIFIER|Embed Foundation Extensions|supportedFamilies' "$f" 2>/dev/null | head -160 || true
+          done < <(grep -RIl --exclude='*.png' --exclude='*.pdf' -E 'com.apple.widgetkit-extension|WKAppBundleIdentifier' "$XCODE/Contents/Developer/Library/Xcode/Templates" 2>/dev/null | head -40)
