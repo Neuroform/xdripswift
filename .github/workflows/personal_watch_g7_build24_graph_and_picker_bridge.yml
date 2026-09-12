@@ -1,0 +1,221 @@
+name: Personal xDrip G7 Watch Build 24
+run-name: G7 Watch Build 24 Graph + Picker Bridge (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_build24_graph_and_picker_bridge.py'
+      - '.github/workflows/personal_watch_g7_build24_graph_and_picker_bridge.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 24
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Check Build 15-24 patch syntax
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build19_split_complications.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build20_complication_registration.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build21_single_configurable_complication.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build22_template_registration.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build23_graph_readability.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build24_graph_and_picker_bridge.py
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply G7 direct baseline and diagnostics
+        run: |
+          python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+          python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+          python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+          python3 .github/scripts/apply_g7_watch_build11_discovery.py
+          python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+          python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+          python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+          python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply Build 16-21 complication chain
+        run: |
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+          python3 .github/scripts/apply_g7_watch_build19_split_complications.py
+          python3 .github/scripts/apply_g7_watch_build20_complication_registration.py
+          python3 .github/scripts/apply_g7_watch_build21_single_configurable_complication.py
+
+      - name: Apply Build 22 graph baseline sizing
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift')
+          text = path.read_text(encoding='utf-8')
+          replacements = {
+              'let labelFontSize: CGFloat = size.width >= 150 ? 9.0 : 8.2':
+                  'let labelFontSize: CGFloat = size.width >= 150 ? 11.0 : 10.0',
+              'let leftMargin: CGFloat = size.width >= 150 ? 24.0 : 22.0':
+                  'let leftMargin: CGFloat = size.width >= 150 ? 28.0 : 25.0',
+              'let bottomMargin: CGFloat = 17.0':
+                  'let bottomMargin: CGFloat = 19.0',
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'Axis patch expected one match for {old!r}, found {count}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Apply Build 22 current-template registration
+        run: python3 .github/scripts/apply_g7_watch_build22_template_registration.py
+
+      - name: Apply Build 23 graph readability
+        run: python3 .github/scripts/apply_g7_watch_build23_graph_readability.py
+
+      - name: Apply Build 24 graph and picker bridge
+        run: python3 .github/scripts/apply_g7_watch_build24_graph_and_picker_bridge.py
+
+      - name: Verify Build 24 source architecture
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          graph = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
+          assert 'private let minimumMgDl = 0.0' in graph
+          assert 'fraction = 0.58 + CGFloat((70.0 - clamped) / 30.0) * 0.22' in graph
+          assert 'let zeroY = yPosition(0)' in graph
+          assert 'for fraction in [0.0, 0.5] as [CGFloat]' in graph
+          assert 'currentLine.addLine(to: CGPoint(x: plotRight, y: zeroY))' in graph
+          assert 'let labelAnchor = level == 220.0 ? UnitPoint(x: 1, y: 0)' in graph
+          assert 'let labelFontSize: CGFloat = size.width >= 150 ? 13.4 : 12.2' in graph
+          assert '.foregroundStyle(Color.white)' in graph
+          assert 'let hourFractions: [CGFloat] = [0.0, 0.5, 1.0]' in graph
+
+          with Path('xDrip-Watch-App-Info.plist').open('rb') as f:
+              watch_info = plistlib.load(f)
+          assert watch_info['CLKComplicationPrincipalClass'] == '$(PRODUCT_MODULE_NAME).ComplicationController'
+          assert watch_info['CLKComplicationSupportedFamilies'] == [
+              'CLKComplicationFamilyGraphicCircular',
+              'CLKComplicationFamilyGraphicRectangular'
+          ]
+
+          app = Path('xDrip Watch App/xDripWatchApp.swift').read_text(encoding='utf-8')
+          assert 'final class ComplicationController' in app
+          assert 'CLKComplicationDataSource' in app
+          assert 'CLKComplicationWidgetMigrator' in app
+          assert 'CLKComplicationStaticWidgetMigrationConfiguration' in app
+          assert 'kind: "xDripWatchComplication"' in app
+
+          print('Build24 source verified: final graph + complication discovery/migration bridge.')
+          PY
+          git diff --check
+
+      - name: Show effective watch build settings
+        run: |
+          xcodebuild -project xdrip.xcodeproj -target 'xDrip Watch App' -configuration Release -showBuildSettings | \
+            egrep 'GENERATE_INFOPLIST_FILE|INFOPLIST_FILE|PRODUCT_BUNDLE_IDENTIFIER|SDKROOT|SKIP_INSTALL|WATCHOS_DEPLOYMENT_TARGET'
+          xcodebuild -project xdrip.xcodeproj -target 'xDrip Watch Complication Extension' -configuration Release -showBuildSettings | \
+            egrep 'APPLICATION_EXTENSION_API_ONLY|GENERATE_INFOPLIST_FILE|INFOPLIST_FILE|PRODUCT_BUNDLE_IDENTIFIER|SDKROOT|SKIP_INSTALL|SUPPORTED_PLATFORMS|WATCHOS_DEPLOYMENT_TARGET'
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Build 24 watch registration
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build24-ipa
+          mkdir -p /tmp/xdrip-build24-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build24-ipa
+
+          WATCH_APP="$(find /tmp/xdrip-build24-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          WATCH_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$WATCH_APP/Info.plist")"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+
+          /usr/libexec/PlistBuddy -c 'Print :CLKComplicationPrincipalClass' "$WATCH_APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CLKComplicationSupportedFamilies' "$WATCH_APP/Info.plist"
+          strings "$WATCH_APP/$WATCH_EXEC" | grep -Fq 'ComplicationController'
+          strings "$WATCH_APP/$WATCH_EXEC" | grep -Fq 'xDrip.graph'
+          strings "$WATCH_APP/$WATCH_EXEC" | grep -Fq 'xDrip.bg'
+
+          DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
+          EXTENSION_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
+          test "$DISPLAY_NAME" = 'xDrip'
+          test "$EXTENSION_POINT" = 'com.apple.widgetkit-extension'
+
+          echo '--- Watch app Info.plist ---'
+          plutil -p "$WATCH_APP/Info.plist"
+          echo '--- Widget extension Info.plist ---'
+          plutil -p "$EXT/Info.plist"
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo 'Packaged Build 24 verified: Watch app advertises ClockKit discovery bridge and embeds WidgetKit renderer.'
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build24-artifacts
+          path: |
+            artifacts
+            buildlog
