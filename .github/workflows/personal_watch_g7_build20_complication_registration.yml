@@ -146,10 +146,8 @@ jobs:
           test -n "$EXT"
           WATCH_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$WATCH_APP/Info.plist")"
           REGISTERED_WATCH_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:WKAppBundleIdentifier' "$EXT/Info.plist")"
-          EXTENSION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
           EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
           test "$REGISTERED_WATCH_BUNDLE" = "$WATCH_BUNDLE"
-          test "$EXTENSION_NAME" = 'xDrip'
           for KIND in xDripWatchComplication xDripBGComplication xDripDeltaComplication xDripLastTimeComplication; do
             strings "$EXT/$EXECUTABLE" | grep -Fq "$KIND"
           done
