@@ -1,0 +1,172 @@
+name: Personal xDrip G7 Watch Build 21
+run-name: G7 Watch Build 21 Single Configurable Complication (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_build21_single_configurable_complication.py'
+      - '.github/workflows/personal_watch_g7_build21_single_configurable_complication.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 21
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Check Build 15-21 patch syntax
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build19_split_complications.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build20_complication_registration.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build21_single_configurable_complication.py
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply G7 direct baseline and diagnostics
+        run: |
+          python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+          python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+          python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+          python3 .github/scripts/apply_g7_watch_build11_discovery.py
+          python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+          python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+          python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+          python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply Build 16 rolling update logic
+        run: |
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
+
+      - name: Apply Build 17-20 complication changes
+        run: |
+          python3 .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+          python3 .github/scripts/apply_g7_watch_build19_split_complications.py
+          python3 .github/scripts/apply_g7_watch_build20_complication_registration.py
+
+      - name: Apply Build 21 registration recovery
+        run: python3 .github/scripts/apply_g7_watch_build21_single_configurable_complication.py
+
+      - name: Verify Build 21 source architecture
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+          p = Path('xDrip Watch Complication/Info.plist')
+          with p.open('rb') as f:
+              info = plistlib.load(f)
+          ext = info['NSExtension']
+          assert ext['NSExtensionPointIdentifier'] == 'com.apple.widgetkit-extension'
+          assert 'NSExtensionAttributes' not in ext
+          print('Build21 source plist matches Xcode 26 Widget Extension template shape.')
+          PY
+          grep -Fq '@main' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'struct XDripWatchComplication: Widget' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          ! grep -Fq 'WidgetBundle' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'AppIntentConfiguration(' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'XDripComplicationConfigurationIntent' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq '.supportedFamilies([.accessoryRectangular, .accessoryCircular])' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'struct Provider: AppIntentTimelineProvider' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -Fq 'policy: .after(nextRefresh)' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -Fq 'private let staleAfter: TimeInterval = 12 * 60' 'xDrip Watch Complication/XDripWatchComplication+Provider.swift'
+          grep -Fq 'WidgetCenter.shared.reloadTimelines(ofKind: "xDripWatchComplication")' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -Fq 'private let visibleDuration: TimeInterval = 2 * 60 * 60' 'xDrip Watch Complication/Views/AccessoryRectangularView.swift'
+          grep -Fq 'INFOPLIST_KEY_CFBundleDisplayName = xDrip;' xdrip.xcodeproj/project.pbxproj
+          git diff --check
+          echo 'Build 21 source architecture verified.'
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Build 21 complication
+        run: |
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build21-ipa
+          mkdir -p /tmp/xdrip-build21-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build21-ipa
+          WATCH_APP="$(find /tmp/xdrip-build21-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          EXTENSION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
+          EXTENSION_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          test "$EXTENSION_NAME" = 'xDrip'
+          test "$EXTENSION_POINT" = 'com.apple.widgetkit-extension'
+          if /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:WKAppBundleIdentifier' "$EXT/Info.plist" >/dev/null 2>&1; then
+            echo 'Unexpected WKAppBundleIdentifier in Build21 WidgetKit extension'
+            exit 1
+          fi
+          strings "$EXT/$EXECUTABLE" | grep -Fq 'xDripWatchComplication'
+          strings "$EXT/$EXECUTABLE" | grep -Fq 'XDripComplicationConfigurationIntent'
+          strings "$EXT/$EXECUTABLE" | grep -Fq 'BG-Wert'
+          strings "$EXT/$EXECUTABLE" | grep -Fq 'Änderung + Trend'
+          strings "$EXT/$EXECUTABLE" | grep -Fq 'Letzte Messzeit'
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo "Packaged Build 21 verified: single configurable xDrip WidgetKit complication, correct display name and Xcode-26 plist shape."
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build21-artifacts
+          path: |
+            artifacts
+            buildlog
