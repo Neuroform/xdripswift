@@ -1,0 +1,176 @@
+name: Personal xDrip G7 Watch Build 20
+run-name: G7 Watch Build 20 Complication Registration (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/scripts/apply_g7_watch_build20_complication_registration.py'
+      - '.github/workflows/personal_watch_g7_build20_complication_registration.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 20
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Check Build 15-20 patch syntax
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build19_split_complications.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build20_complication_registration.py
+
+      - name: Apply personal Watch Phase 1 patch
+        run: python3 .github/scripts/apply_personal_watch_phase1.py
+
+      - name: Apply Build 7 G7 direct baseline
+        run: python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+
+      - name: Apply manual G7 auth probe and stale BG safety
+        run: python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+
+      - name: Apply G7 auth disconnect telemetry
+        run: python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+
+      - name: Apply Build 11 six-minute G7 discovery
+        run: python3 .github/scripts/apply_g7_watch_build11_discovery.py
+
+      - name: Apply Build 12 multi-window connection/GATT probe
+        run: python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+
+      - name: Apply Build 13 name-independent Notify listener
+        run: python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+
+      - name: Apply Build 14 passive BG decoder
+        run: python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+
+      - name: Apply Build 15 multi-cycle validation
+        run: python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply Build 16 rolling complication and update logic
+        run: |
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
+
+      - name: Apply Build 17 Ultra layout baseline
+        run: python3 .github/scripts/apply_g7_watch_build17_ultra_layout.py
+
+      - name: Apply Build 18 Ultra full-area baseline
+        run: python3 .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+
+      - name: Apply Build 19 split complications and refresh logic
+        run: python3 .github/scripts/apply_g7_watch_build19_split_complications.py
+
+      - name: Apply Build 20 complication registration fix
+        run: python3 .github/scripts/apply_g7_watch_build20_complication_registration.py
+
+      - name: Verify Build 20 source architecture
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+          p = Path('xDrip Watch Complication/Info.plist')
+          with p.open('rb') as f:
+              info = plistlib.load(f)
+          ext = info['NSExtension']
+          assert ext['NSExtensionPointIdentifier'] == 'com.apple.widgetkit-extension'
+          assert ext['NSExtensionAttributes']['WKAppBundleIdentifier'] == '$(MAIN_APP_BUNDLE_IDENTIFIER).watchkitapp'
+          assert info['CFBundleDisplayName'] == 'xDrip'
+          print('Source Info.plist registration metadata verified.')
+          PY
+          grep -Fq 'struct XDripWatchComplicationBundle: WidgetBundle' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'let kind: String = "xDripWatchComplication"' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'let kind: String = "xDripBGComplication"' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'let kind: String = "xDripDeltaComplication"' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'let kind: String = "xDripLastTimeComplication"' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          test "$(grep -Fc '.supportedFamilies([.accessoryCircular])' 'xDrip Watch Complication/XDripWatchComplication.swift')" -eq 3
+          grep -Fq '.supportedFamilies([.accessoryRectangular])' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          git diff --check
+
+      - name: Show local patch diff
+        run: git diff --stat
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch complication registration
+        run: |
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build20-ipa
+          mkdir -p /tmp/xdrip-build20-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build20-ipa
+          WATCH_APP="$(find /tmp/xdrip-build20-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          WATCH_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$WATCH_APP/Info.plist")"
+          REGISTERED_WATCH_BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:WKAppBundleIdentifier' "$EXT/Info.plist")"
+          EXTENSION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          test "$REGISTERED_WATCH_BUNDLE" = "$WATCH_BUNDLE"
+          test "$EXTENSION_NAME" = 'xDrip'
+          for KIND in xDripWatchComplication xDripBGComplication xDripDeltaComplication xDripLastTimeComplication; do
+            strings "$EXT/$EXECUTABLE" | grep -Fq "$KIND"
+          done
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo "Packaged Build 20 verified: WidgetKit extension points to $WATCH_BUNDLE and contains all four xDrip complication kinds."
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build20-artifacts
+          path: |
+            artifacts
+            buildlog
