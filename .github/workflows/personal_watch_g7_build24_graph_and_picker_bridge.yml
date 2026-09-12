@@ -185,9 +185,12 @@ jobs:
 
           /usr/libexec/PlistBuddy -c 'Print :CLKComplicationPrincipalClass' "$WATCH_APP/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :CLKComplicationSupportedFamilies' "$WATCH_APP/Info.plist"
-          strings "$WATCH_APP/$WATCH_EXEC" | grep -Fq 'ComplicationController'
-          strings "$WATCH_APP/$WATCH_EXEC" | grep -Fq 'xDrip.graph'
-          strings "$WATCH_APP/$WATCH_EXEC" | grep -Fq 'xDrip.bg'
+
+          WATCH_STRINGS='/tmp/xdrip-build24-watch-strings.txt'
+          strings "$WATCH_APP/$WATCH_EXEC" > "$WATCH_STRINGS"
+          grep -Fq 'ComplicationController' "$WATCH_STRINGS"
+          grep -Fq 'xDrip.graph' "$WATCH_STRINGS"
+          grep -Fq 'xDrip.bg' "$WATCH_STRINGS"
 
           DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
           EXTENSION_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
