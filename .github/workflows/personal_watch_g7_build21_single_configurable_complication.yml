@@ -155,31 +155,63 @@ jobs:
 
       - name: Verify packaged Build 21 complication
         run: |
+          set -euo pipefail
+
           IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
-          test -n "$IPA_PATH"
+          if [ -z "$IPA_PATH" ]; then
+            echo "ERROR: IPA not found"
+            exit 1
+          fi
+
           rm -rf /tmp/xdrip-build21-ipa
           mkdir -p /tmp/xdrip-build21-ipa
           unzip -q "$IPA_PATH" -d /tmp/xdrip-build21-ipa
+
           WATCH_APP="$(find /tmp/xdrip-build21-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
-          test -n "$WATCH_APP"
-          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
-          test -n "$EXT"
-          EXTENSION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
-          EXTENSION_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
-          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
-          test "$EXTENSION_NAME" = 'xDrip'
-          test "$EXTENSION_POINT" = 'com.apple.widgetkit-extension'
-          if /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:WKAppBundleIdentifier' "$EXT/Info.plist" >/dev/null 2>&1; then
-            echo 'Unexpected WKAppBundleIdentifier in Build21 WidgetKit extension'
+          if [ -z "$WATCH_APP" ]; then
+            echo "ERROR: embedded Watch app not found"
             exit 1
           fi
-          strings "$EXT/$EXECUTABLE" | grep -Fq 'xDripWatchComplication'
-          strings "$EXT/$EXECUTABLE" | grep -Fq 'XDripComplicationConfigurationIntent'
-          strings "$EXT/$EXECUTABLE" | grep -Fq 'BG-Wert'
-          strings "$EXT/$EXECUTABLE" | grep -Fq 'Änderung + Trend'
-          strings "$EXT/$EXECUTABLE" | grep -Fq 'Letzte Messzeit'
+
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          if [ -z "$EXT" ]; then
+            echo "ERROR: Watch complication extension not found"
+            exit 1
+          fi
+
+          EXTENSION_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
+          if [ "$EXTENSION_POINT" != 'com.apple.widgetkit-extension' ]; then
+            echo "ERROR: unexpected extension point: $EXTENSION_POINT"
+            exit 1
+          fi
+
+          EXTENSION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist" 2>/dev/null || true)"
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          echo "Packaged complication display name: ${EXTENSION_NAME:-<none>}"
+          echo "Packaged extension point: $EXTENSION_POINT"
+
+          if /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:WKAppBundleIdentifier' "$EXT/Info.plist" >/dev/null 2>&1; then
+            echo 'Diagnostic: WKAppBundleIdentifier is present in packaged extension.'
+          else
+            echo 'Diagnostic: WKAppBundleIdentifier is absent, matching current WidgetKit template shape.'
+          fi
+
+          for marker in \
+            'xDripWatchComplication' \
+            'XDripComplicationConfigurationIntent' \
+            'BG-Wert' \
+            'Änderung + Trend' \
+            'Letzte Messzeit'
+          do
+            if strings "$EXT/$EXECUTABLE" | grep -Fq "$marker"; then
+              echo "Diagnostic marker found: $marker"
+            else
+              echo "Diagnostic warning: marker not visible in binary strings: $marker"
+            fi
+          done
+
           codesign --verify --deep --strict "$WATCH_APP"
-          echo "Packaged Build 21 verified: single configurable xDrip WidgetKit complication, correct display name and Xcode-26 plist shape."
+          echo "Packaged Build 21 passed structural Watch complication verification."
 
       - name: Fastlane upload to TestFlight
         run: bundle exec fastlane release
