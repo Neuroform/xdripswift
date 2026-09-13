@@ -1,0 +1,197 @@
+name: Personal xDrip G7 Watch Build 28 Clean v2
+run-name: G7 Watch Build 28 Clean WidgetKit v2 (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/scripts/apply_g7_watch_build28_clean_widgetkit_v2.py'
+      - '.github/workflows/personal_watch_g7_build28_clean_widgetkit_v2.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 28 Clean v2
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode 26.2
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout clean repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Compile-check clean patches
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build28_clean_widgetkit_complications.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build28_clean_widgetkit_v2.py
+
+      - name: Apply personal G7 baseline through Build 15 only
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_personal_watch_phase1.py
+          python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+          python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+          python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+          python3 .github/scripts/apply_g7_watch_build11_discovery.py
+          python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+          python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+          python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+          python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply corrected clean Build 28 complications
+        run: python3 .github/scripts/apply_g7_watch_build28_clean_widgetkit_v2.py
+
+      - name: Verify source architecture
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          widget = Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          required = [
+              'struct XDripWatchComplicationBundle: WidgetBundle',
+              'xDripGraphV28', 'xDripBGV28', 'xDripTrendV28',
+              'Martin’s xDrip Graph', 'xDrip BG mg/dL', 'BG Trend + Δ mg/dL',
+              '.supportedFamilies([.accessoryRectangular])',
+              '.supportedFamilies([.accessoryCircular])',
+              'Build28MinuteRing', 'Text("- - -")'
+          ]
+          for token in required:
+              assert token in widget, token
+
+          graph = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
+          assert '(maximumMgDl - clamped) / (maximumMgDl - minimumMgDl)' in graph
+          assert 'case 220:' in graph
+          assert 'case 160, 70:' in graph
+          assert 'color = .yellow' in graph
+          assert 'color = .red' in graph
+          assert 'context.stroke(zero, with: .color(.white)' in graph
+
+          provider = Path('xDrip Watch Complication/XDripWatchComplication+Provider.swift').read_text(encoding='utf-8')
+          assert 'timelineStep: TimeInterval = 60' in provider
+          assert 'staleAfter: TimeInterval = 12 * 60' in provider
+          assert 'staleAfter + 1' in provider
+
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          assert 'reloadAllTimelines()' not in state
+          assert 'WidgetCenter.shared.reloadTimelines(ofKind: complicationKind)' in state
+          for kind in ['xDripGraphV28','xDripBGV28','xDripTrendV28']:
+              assert kind in state
+
+          app = Path('xDrip Watch App/xDripWatchApp.swift').read_text(encoding='utf-8')
+          assert 'ClockKit' not in app and 'CLKComplication' not in app
+
+          with Path('xDrip-Watch-App-Info.plist').open('rb') as f:
+              info = plistlib.load(f)
+          assert 'CLKComplicationPrincipalClass' not in info
+          assert 'CLKComplicationSupportedFamilies' not in info
+
+          with Path('xDrip Watch Complication/Info.plist').open('rb') as f:
+              ext = plistlib.load(f)
+          assert set(ext.keys()) == {'AppGroupIdentifier','MainAppBundleIdentifier','NSExtension'}
+          assert ext['NSExtension']['NSExtensionPointIdentifier'] == 'com.apple.widgetkit-extension'
+
+          print('Build28 clean source verified.')
+          PY
+          git diff --check
+
+      - name: Verify original upstream complication target settings
+        run: |
+          set -euo pipefail
+          xcodebuild -project xdrip.xcodeproj -target 'xDrip Watch Complication Extension' -configuration Release -showBuildSettings > /tmp/build28-settings.txt
+          grep -F 'GENERATE_INFOPLIST_FILE = YES' /tmp/build28-settings.txt
+          grep -F 'INFOPLIST_FILE = xDrip Watch Complication/Info.plist' /tmp/build28-settings.txt
+          grep -F 'SDKROOT = watchos' /tmp/build28-settings.txt
+          if grep -Fq 'APPLICATION_EXTENSION_API_ONLY = YES' /tmp/build28-settings.txt; then
+            echo 'ERROR: legacy Build22 target override detected'
+            exit 1
+          fi
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install project dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify final IPA before TestFlight
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build28-ipa && mkdir -p /tmp/xdrip-build28-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build28-ipa
+
+          PHONE_APP="$(find /tmp/xdrip-build28-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$PHONE_APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -maxdepth 1 -name '*Complication*.appex' -type d -print -quit)"
+          test -n "$PHONE_APP" && test -n "$WATCH_APP" && test -n "$EXT"
+
+          PV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PHONE_APP/Info.plist")"
+          WV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$WATCH_APP/Info.plist")"
+          EV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXT/Info.plist")"
+          test "$PV" = "$WV" && test "$WV" = "$EV"
+
+          POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
+          test "$POINT" = 'com.apple.widgetkit-extension'
+
+          if /usr/libexec/PlistBuddy -c 'Print :CLKComplicationPrincipalClass' "$WATCH_APP/Info.plist" >/dev/null 2>&1; then exit 1; fi
+          if /usr/libexec/PlistBuddy -c 'Print :CLKComplicationSupportedFamilies' "$WATCH_APP/Info.plist" >/dev/null 2>&1; then exit 1; fi
+
+          WATCH_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$WATCH_APP/Info.plist")"
+          EXT_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/Info.plist")"
+          case "$EXT_ID" in "$WATCH_ID".*) ;; *) exit 1 ;; esac
+
+          codesign --verify --strict --verbose=2 "$EXT"
+          codesign --verify --deep --strict --verbose=2 "$WATCH_APP"
+
+          security cms -D -i "$EXT/embedded.mobileprovision" > /tmp/build28-ext-profile.plist
+          PROFILE_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /tmp/build28-ext-profile.plist)"
+          case "$PROFILE_APP_ID" in *".$EXT_ID") ;; *) exit 1 ;; esac
+
+          echo 'Build28 IPA verified: embedded WidgetKit extension, matching versions, valid signing/profile, no ClockKit override.'
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build28-clean-v2-artifacts
+          path: |
+            artifacts
+            buildlog
