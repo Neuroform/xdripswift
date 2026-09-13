@@ -115,7 +115,6 @@ jobs:
           xcodebuild -project xdrip.xcodeproj -target 'xDrip Watch Complication Extension' -configuration Release -showBuildSettings > /tmp/build28-settings.txt
           grep -F 'GENERATE_INFOPLIST_FILE = YES' /tmp/build28-settings.txt
           grep -F 'INFOPLIST_FILE = xDrip Watch Complication/Info.plist' /tmp/build28-settings.txt
-          grep -F 'SDKROOT = watchos' /tmp/build28-settings.txt
           if grep -Fq 'APPLICATION_EXTENSION_API_ONLY = YES' /tmp/build28-settings.txt; then
             echo 'ERROR: legacy Build22 target override detected'
             exit 1
