@@ -190,7 +190,7 @@ jobs:
           strings "$WATCH_APP/$WATCH_EXEC" > "$WATCH_STRINGS"
           grep -Fq 'ComplicationController' "$WATCH_STRINGS"
           grep -Fq 'xDrip.graph' "$WATCH_STRINGS"
-          grep -Fq 'xDrip.bg' "$WATCH_STRINGS"
+          grep -Fq 'xDripWatchComplication' "$WATCH_STRINGS"
 
           DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXT/Info.plist")"
           EXTENSION_POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
