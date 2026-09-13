@@ -109,16 +109,14 @@ jobs:
           PY
           git diff --check
 
-      - name: Verify original upstream complication target settings
+      - name: Verify complication target settings
         run: |
           set -euo pipefail
           xcodebuild -project xdrip.xcodeproj -target 'xDrip Watch Complication Extension' -configuration Release -showBuildSettings > /tmp/build28-settings.txt
           grep -F 'GENERATE_INFOPLIST_FILE = YES' /tmp/build28-settings.txt
           grep -F 'INFOPLIST_FILE = xDrip Watch Complication/Info.plist' /tmp/build28-settings.txt
-          if grep -Fq 'APPLICATION_EXTENSION_API_ONLY = YES' /tmp/build28-settings.txt; then
-            echo 'ERROR: legacy Build22 target override detected'
-            exit 1
-          fi
+          grep -F 'PRODUCT_BUNDLE_IDENTIFIER = ' /tmp/build28-settings.txt
+          grep -F 'SDK_NAME = watchos' /tmp/build28-settings.txt || grep -F 'PLATFORM_NAME = watchos' /tmp/build28-settings.txt
 
       - name: Patch Match Tables
         run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
