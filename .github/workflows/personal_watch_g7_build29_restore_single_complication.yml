@@ -1,0 +1,144 @@
+name: Personal xDrip G7 Watch Build 29 Restore Single Complication
+run-name: G7 Watch Build 29 Restore Single Complication (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/scripts/apply_g7_watch_build29_restore_single_complication.py'
+      - '.github/workflows/personal_watch_g7_build29_restore_single_complication.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 29
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode 26.2
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Compile-check patches
+        run: |
+          python3 -m py_compile .github/scripts/apply_g7_watch_build28_clean_widgetkit_v2.py
+          python3 -m py_compile .github/scripts/apply_g7_watch_build29_restore_single_complication.py
+
+      - name: Apply personal G7 baseline through Build 15
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_personal_watch_phase1.py
+          python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+          python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+          python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+          python3 .github/scripts/apply_g7_watch_build11_discovery.py
+          python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+          python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+          python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+          python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+
+      - name: Apply final graph and timeline implementation
+        run: python3 .github/scripts/apply_g7_watch_build28_clean_widgetkit_v2.py
+
+      - name: Restore known-good single complication registration
+        run: python3 .github/scripts/apply_g7_watch_build29_restore_single_complication.py
+
+      - name: Verify registration before archive
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          widget = Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          circular = Path('xDrip Watch Complication/Views/AccessoryCircularView.swift').read_text(encoding='utf-8')
+          assert '@main\nstruct XDripWatchComplication: Widget' in widget
+          assert 'let kind: String = "xDripWatchComplication"' in widget
+          assert 'WidgetBundle' not in widget
+          assert 'xDripGraphV28' not in widget
+          assert '.supportedFamilies([.accessoryRectangular, .accessoryCircular])' in widget
+          assert 'XDripBGMinuteCircleView(entry: entry)' in circular
+          assert 'reloadTimelines(ofKind: "xDripWatchComplication")' in state
+          assert 'xDripGraphV28' not in state and 'xDripBGV28' not in state and 'xDripTrendV28' not in state
+          print('Build29 registration verified: exactly one original xDrip widget kind.')
+          PY
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install project dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify final IPA before TestFlight
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build29-ipa && mkdir -p /tmp/xdrip-build29-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build29-ipa
+
+          PHONE_APP="$(find /tmp/xdrip-build29-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$PHONE_APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -maxdepth 1 -name '*Complication*.appex' -type d -print -quit)"
+          test -n "$PHONE_APP" && test -n "$WATCH_APP" && test -n "$EXT"
+
+          POINT="$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")"
+          test "$POINT" = 'com.apple.widgetkit-extension'
+
+          BIN="$EXT/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          strings "$BIN" > /tmp/build29-strings.txt
+          grep -F 'xDripWatchComplication' /tmp/build29-strings.txt >/dev/null
+          if grep -Fq 'xDripGraphV28' /tmp/build29-strings.txt; then
+            echo 'ERROR: abandoned Build28 multi-widget kind still present in final binary'
+            exit 1
+          fi
+
+          codesign --verify --strict --verbose=2 "$EXT"
+          codesign --verify --deep --strict --verbose=2 "$WATCH_APP"
+          echo 'Build29 IPA verified: original single WidgetKit complication kind embedded and signed.'
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build29-artifacts
+          path: |
+            artifacts
+            buildlog
