@@ -75,18 +75,17 @@ linear = '''            func yPosition(_ value: Double) -> CGFloat {
 '''
 replace_once(graph, piecewise, linear, "Build30 proportional y-axis")
 
-# Replace the Build-24 threshold rendering with the final approved line colors/styles
-# and label vertical anchors. Registration/discovery files remain untouched.
+# Replace only the threshold loop. Do not depend on the exact preceding comment text,
+# because Build 24 inherited that comment from earlier graph builds.
 text = graph.read_text(encoding="utf-8")
-start_token = "            // Horizontal monitor grid and requested 40...220 mg/dL scale.\n"
+loop_token = "            for level in [220.0, 160.0, 70.0, 40.0] {\n"
 end_token = "            // Unlabelled zero baseline."
-start = text.find(start_token)
+start = text.find(loop_token)
 end = text.find(end_token, start)
 if start < 0 or end < 0:
-    raise RuntimeError("Build30: horizontal threshold block not found")
+    raise RuntimeError("Build30: threshold loop or zero-baseline marker not found")
 
-threshold_block = '''            // Horizontal monitor grid, using the user-approved final styling.
-            for level in [220.0, 160.0, 70.0, 40.0] {
+threshold_block = '''            for level in [220.0, 160.0, 70.0, 40.0] {
                 let y = yPosition(level)
                 var path = Path()
                 path.move(to: CGPoint(x: plotLeft, y: y))
@@ -111,8 +110,6 @@ threshold_block = '''            // Horizontal monitor grid, using the user-appr
 
                 context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 0.75, dash: dash))
 
-                // 220: top edge of the label is exactly on the yellow top line.
-                // 70: label sits above its line. 40: label sits below its line.
                 let labelAnchor: UnitPoint
                 switch Int(level) {
                 case 220: labelAnchor = UnitPoint(x: 1, y: 0)
@@ -125,10 +122,8 @@ threshold_block = '''            // Horizontal monitor grid, using the user-appr
 
 '''
 text = text[:start] + threshold_block + text[end:]
-
 graph.write_text(text, encoding="utf-8")
 
-# Final approved baseline: white solid, not dashed gray.
 replace_once(
     graph,
     '''            context.stroke(
@@ -144,7 +139,6 @@ replace_once(
     "Build30 solid white zero baseline",
 )
 
-# Vertical full-hour guides are brighter white dashed lines.
 replace_once(
     graph,
     '''                    with: .color(Color.secondary.opacity(0.58)),
@@ -154,15 +148,12 @@ replace_once(
     "Build30 white hour guides",
 )
 
-# Preserve the right-edge NOW line geometry but make it solid white.
 text = graph.read_text(encoding="utf-8")
 if "currentLine.addLine(to: CGPoint(x: plotRight, y: zeroY))" not in text:
     raise RuntimeError("Build30: Build24 current-time line geometry missing")
-text = text.replace(
-    "context.stroke(currentLine, with: .color(Color.secondary.opacity(0.75)), lineWidth: 0.8)",
-    "context.stroke(currentLine, with: .color(Color.white), lineWidth: 0.8)",
-    1,
-)
+old_now = "context.stroke(currentLine, with: .color(Color.secondary.opacity(0.75)), lineWidth: 0.8)"
+if old_now in text:
+    text = text.replace(old_now, "context.stroke(currentLine, with: .color(Color.white), lineWidth: 0.8)", 1)
 graph.write_text(text, encoding="utf-8")
 
 # Prove that this post-patch did not touch any registration/discovery file.
