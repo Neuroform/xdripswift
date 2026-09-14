@@ -1,0 +1,205 @@
+name: Personal xDrip G7 Watch Build 34
+run-name: G7 Watch Build 34 Graph Only (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build34_graph_only.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 34
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout historical source containing verified Watch chain
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: c4a3c3ff2ef117f350d91795b2154cc5191b36b1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Apply verified working chain through Build 18
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_personal_watch_phase1.py
+          python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+          python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+          python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+          python3 .github/scripts/apply_g7_watch_build11_discovery.py
+          python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+          python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+          python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+          python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+
+      - name: Preserve working Build 33 WidgetKit registration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('xDrip Watch Complication/XDripWatchComplication.swift')
+          s = p.read_text(encoding='utf-8')
+          old_kind = 'let kind: String = "xDripWatchComplication"'
+          if s.count(old_kind) != 1:
+              raise RuntimeError(f'Expected exactly one original widget kind, found {s.count(old_kind)}')
+          s = s.replace(old_kind, 'let kind: String = "xDripGraphV33"', 1)
+          old = '''        .configurationDisplayName(ConstantsHomeView.applicationName)\n        .description("Show the current blood glucose level")\n        // Build 18: use every pixel WidgetKit exposes for the middle Ultra complication.\n        .contentMarginsDisabled()'''
+          new = '''        .configurationDisplayName("xDrip Graph")\n        .description("xDrip 2-hour glucose graph")\n        .supportedFamilies([.accessoryRectangular])\n        .contentMarginsDisabled()'''
+          if s.count(old) != 1:
+              raise RuntimeError(f'Expected exactly one Build18 widget configuration, found {s.count(old)}')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Apply graph-only full-area layout
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift')
+          s = p.read_text(encoding='utf-8')
+
+          # Remove the complete right-side BG / trend / delta / measurement-time panel.
+          # The rectangular complication is now exclusively the rolling glucose graph.
+          geometry_start = s.index('            GeometryReader { geometry in')
+          overlay_start = s.index('\n\n            if entry.widgetState.keepAliveIsDisabled', geometry_start)
+          graph_only = '''            RollingTwoHourGlucoseGraph(entry: entry)\n                .frame(maxWidth: .infinity, maxHeight: .infinity)'''
+          s = s[:geometry_start] + graph_only + s[overlay_start:]
+
+          panel_start = s.index('\n\nprivate struct CurrentGlucosePanel: View')
+          graph_start = s.index('\n\nprivate struct RollingTwoHourGlucoseGraph: View', panel_start)
+          s = s[:panel_start] + s[graph_start:]
+
+          # Use the recovered width for a substantially larger, more legible graph.
+          old_margins = '''            // Build 18: use virtually the complete Canvas. Only reserve enough room for\n            // readable 3-digit Y labels and the moving HH:mm labels. No decorative padding.\n            let leftMargin: CGFloat = size.width < 115 ? 13 : 15\n            let rightMargin: CGFloat = 0\n            let topMargin: CGFloat = 0.5\n            let bottomMargin: CGFloat = size.height < 55 ? 8 : 9'''
+          new_margins = '''            // Build 34: the whole rectangular complication belongs to the graph.\n            // Reserve only the space required for larger Y labels and HH:mm labels.\n            let leftMargin: CGFloat = size.width < 115 ? 22 : 25\n            let rightMargin: CGFloat = 1\n            let topMargin: CGFloat = 7\n            let bottomMargin: CGFloat = size.height < 55 ? 14 : 16'''
+          if old_margins not in s:
+              raise RuntimeError('Build34: expected Build18 graph margins not found')
+          s = s.replace(old_margins, new_margins, 1)
+
+          old_y = '''                drawLabel(String(Int(level)), at: CGPoint(x: plotLeft - 1.5, y: y), anchor: UnitPoint(x: 1, y: 0.5), size: 6.0)'''
+          new_y = '''                let labelAnchor: UnitPoint = level == 220.0 ? UnitPoint(x: 1, y: 0) : UnitPoint(x: 1, y: 0.5)\n                drawLabel(String(Int(level)), at: CGPoint(x: plotLeft - 3.0, y: y), anchor: labelAnchor, size: 9.0)'''
+          if old_y not in s:
+              raise RuntimeError('Build34: expected Build18 Y-axis label statement not found')
+          s = s.replace(old_y, new_y, 1)
+
+          old_times = '''            drawLabel(Self.timeFormatter.string(from: leftDate), at: CGPoint(x: plotLeft, y: labelY), anchor: UnitPoint(x: 0, y: 1), size: 6.0)\n            drawLabel(Self.timeFormatter.string(from: middleDate), at: CGPoint(x: plotLeft + plotWidth / 2, y: labelY), anchor: UnitPoint(x: 0.5, y: 1), size: 6.0)\n            drawLabel(Self.timeFormatter.string(from: entry.date), at: CGPoint(x: plotRight, y: labelY), anchor: UnitPoint(x: 1, y: 1), size: 6.0)'''
+          new_times = '''            drawLabel(Self.timeFormatter.string(from: leftDate), at: CGPoint(x: plotLeft, y: labelY), anchor: UnitPoint(x: 0, y: 1), size: 9.0)\n            drawLabel(Self.timeFormatter.string(from: middleDate), at: CGPoint(x: plotLeft + plotWidth / 2, y: labelY), anchor: UnitPoint(x: 0.5, y: 1), size: 9.0)\n            drawLabel(Self.timeFormatter.string(from: entry.date), at: CGPoint(x: plotRight, y: labelY), anchor: UnitPoint(x: 1, y: 1), size: 9.0)'''
+          if old_times not in s:
+              raise RuntimeError('Build34: expected Build18 time-axis labels not found')
+          s = s.replace(old_times, new_times, 1)
+
+          # Make all graph labels high-contrast and easier to read.
+          old_label = '''                    Text(text)\n                        .font(.system(size: fontSize, weight: .medium))\n                        .foregroundStyle(Color.secondary)'''
+          new_label = '''                    Text(text)\n                        .font(.system(size: fontSize, weight: .semibold))\n                        .foregroundStyle(Color.white)\n                        .monospacedDigit()'''
+          if old_label not in s:
+              raise RuntimeError('Build34: expected graph label renderer not found')
+          s = s.replace(old_label, new_label, 1)
+
+          # Preserve dashed time subdivisions and the solid right-side NOW line from the
+          # verified graph implementation. There is deliberately no left solid boundary.
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Verify Build 34 graph contract
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          widget = Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          view = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
+          app = Path('xDrip Watch App/xDripWatchApp.swift').read_text(encoding='utf-8')
+
+          assert 'let kind: String = "xDripGraphV33"' in widget
+          assert '.supportedFamilies([.accessoryRectangular])' in widget
+          assert '.configurationDisplayName("xDrip Graph")' in widget
+          assert 'CurrentGlucosePanel' not in view
+          assert 'glucoseText' not in view
+          assert 'deltaText' not in view
+          assert 'trendArrow' not in view
+          assert 'latestDate?.formatted' not in view
+          assert 'private let minimumMgDl = 40.0' in view
+          assert 'private let maximumMgDl = 220.0' in view
+          assert 'private let visibleDuration: TimeInterval = 2 * 60 * 60' in view
+          assert 'size: 9.0' in view
+          assert 'ComplicationController' not in app
+          assert 'CLKComplicationDataSource' not in app
+          print('Build34 verified: working Build33 registration preserved; rectangular complication contains graph only.')
+          PY
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch WidgetKit extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build34-ipa
+          mkdir -p /tmp/xdrip-build34-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build34-ipa
+          WATCH_APP="$(find /tmp/xdrip-build34-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          EXT_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          strings "$EXT/$EXT_EXEC" > /tmp/build34-ext-strings.txt
+          grep -Fq 'xDripGraphV33' /tmp/build34-ext-strings.txt
+          grep -Fq 'xDrip Graph' /tmp/build34-ext-strings.txt
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo 'Build34 packaged watch app verified.'
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build34-graph-only-artifacts
+          path: |
+            artifacts
+            buildlog
