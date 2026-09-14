@@ -1,0 +1,164 @@
+name: Personal xDrip G7 Watch Build 36
+run-name: G7 Watch Build 36 Final Widgets (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build36_final_widgets.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 36
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout historical source containing verified Watch chain
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: c4a3c3ff2ef117f350d91795b2154cc5191b36b1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout current Build 36 patch scripts
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+          path: _build36_patches
+
+      - name: Apply verified working chain through Build 18
+        run: |
+          set -euo pipefail
+          P="_build36_patches/.github/scripts"
+          python3 "$P/apply_personal_watch_phase1.py"
+          python3 "$P/apply_g7_watch_ble_diagnostic.py"
+          python3 "$P/apply_g7_watch_auth_probe_and_stale_safety.py"
+          python3 "$P/apply_g7_watch_auth_telemetry.py"
+          python3 "$P/apply_g7_watch_build11_discovery.py"
+          python3 "$P/apply_g7_watch_build12_multiwindow.py"
+          python3 "$P/apply_g7_watch_build13_notify_listener.py"
+          python3 "$P/apply_g7_watch_build14_passive_decoder.py"
+          python3 "$P/apply_g7_watch_build15_multicycle_validation.py"
+          python3 "$P/apply_g7_watch_build16_complication_refresh.py"
+          python3 "$P/apply_g7_watch_build16_compile_fixes.py"
+          python3 "$P/apply_g7_watch_build17_ultra_layout.py"
+          python3 "$P/apply_g7_watch_build18_ultra_fullarea.py"
+
+      - name: Reproduce Build 34 graph-only baseline
+        run: |
+          set -euo pipefail
+          python3 _build36_patches/.github/scripts/apply_g7_watch_build34_graph_only.py
+
+      - name: Apply Build 36 final widgets
+        run: |
+          set -euo pipefail
+          python3 _build36_patches/.github/scripts/apply_g7_watch_build36_final_widgets.py
+
+      - name: Verify Build 36 contract
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          widget = Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          rect = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
+          circ = Path('xDrip Watch Complication/Views/AccessoryCircularView.swift').read_text(encoding='utf-8')
+          provider = Path('xDrip Watch Complication/XDripWatchComplication+Provider.swift').read_text(encoding='utf-8')
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+
+          assert 'xDripGraphV33' in widget
+          assert 'xDripBGV36' in widget
+          assert 'xDripDeltaV36' in widget
+          assert 'XDripWatchComplicationBundleV36' in widget
+          assert '150 * 60' in rect
+          assert 'minimumMgDl = 0.0' in rect
+          assert 'maximumMgDl = 200.0' in rect
+          assert 'for level in [200.0, 160.0, 70.0, 0.0]' in rect
+          assert 'dash = [3.0, 2.5]' in rect
+          assert 'value < 70' in circ
+          assert 'value < 160' in circ
+          assert 'return .yellow' in circ
+          assert 'foregroundStyle(Color.white)' in circ
+          assert 'v36Age > 6 * 60' in circ
+          assert 'v36Age > 12 * 60' in circ
+          assert 'return "---"' in circ
+          assert 'magnitude <= 3' in circ
+          assert 'magnitude <= 7' in circ
+          assert 'dimAfter: TimeInterval = 6 * 60' in provider
+          assert 'staleAfter: TimeInterval = 12 * 60' in provider
+          assert 'xDripBGV36' in state and 'xDripDeltaV36' in state and 'xDripGraphV33' in state
+          print('Build36 source contract verified.')
+          PY
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build36-ipa
+          mkdir -p /tmp/xdrip-build36-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build36-ipa
+          WATCH_APP="$(find /tmp/xdrip-build36-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          EXT_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          strings "$EXT/$EXT_EXEC" > /tmp/build36-ext-strings.txt
+          grep -Fq 'xDripGraphV33' /tmp/build36-ext-strings.txt
+          grep -Fq 'xDripBGV36' /tmp/build36-ext-strings.txt
+          grep -Fq 'xDripDeltaV36' /tmp/build36-ext-strings.txt
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo 'Build36 packaged Watch extension verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build36-final-widgets-artifacts
+          path: |
+            artifacts
+            buildlog
