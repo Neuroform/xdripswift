@@ -1,0 +1,178 @@
+name: Personal xDrip G7 Watch Build 41
+run-name: G7 Watch Build 41 BLE Lifecycle Trace (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build41_ble_lifecycle_trace.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 41
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout historical source containing verified Watch chain
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: c4a3c3ff2ef117f350d91795b2154cc5191b36b1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout current Build 41 patch scripts
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+          path: _build41_patches
+
+      - name: Apply verified working chain through Build 18
+        run: |
+          set -euo pipefail
+          P="_build41_patches/.github/scripts"
+          python3 "$P/apply_personal_watch_phase1.py"
+          python3 "$P/apply_g7_watch_ble_diagnostic.py"
+          python3 "$P/apply_g7_watch_auth_probe_and_stale_safety.py"
+          python3 "$P/apply_g7_watch_auth_telemetry.py"
+          python3 "$P/apply_g7_watch_build11_discovery.py"
+          python3 "$P/apply_g7_watch_build12_multiwindow.py"
+          python3 "$P/apply_g7_watch_build13_notify_listener.py"
+          python3 "$P/apply_g7_watch_build14_passive_decoder.py"
+          python3 "$P/apply_g7_watch_build15_multicycle_validation.py"
+          python3 "$P/apply_g7_watch_build16_complication_refresh.py"
+          python3 "$P/apply_g7_watch_build16_compile_fixes.py"
+          python3 "$P/apply_g7_watch_build17_ultra_layout.py"
+          python3 "$P/apply_g7_watch_build18_ultra_fullarea.py"
+
+      - name: Reproduce accepted Build 37
+        run: |
+          set -euo pipefail
+          P="_build41_patches/.github/scripts"
+          python3 "$P/apply_g7_watch_build34_graph_only.py"
+          python3 "$P/apply_g7_watch_build36_final_widgets.py"
+          python3 "$P/apply_g7_watch_build37_minute_tick_bezel.py"
+
+      - name: Freeze accepted Build 37 safety hashes
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build41-frozen.sha
+          done
+          cp 'xDrip Watch App/DataModels/WatchStateModel.swift' /tmp/build41-watchstate-before.swift
+
+      - name: Apply Build 41 BLE lifecycle trace
+        run: |
+          set -euo pipefail
+          python3 _build41_patches/.github/scripts/apply_g7_watch_build41_ble_lifecycle_trace.py
+
+      - name: Verify Build 41 narrow safety contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build41-frozen.sha
+
+          python3 - <<'PY'
+          from pathlib import Path
+          before = Path('/tmp/build41-watchstate-before.swift').read_text(encoding='utf-8')
+          after = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+
+          assert before != after, 'Build41 must change WatchStateModel'
+          for token in [
+              'xdrip.g7Direct.lifecycleTrace41',
+              'trace41("START',
+              'trace41("CENTRAL state=',
+              'trace41("RESTORE count=',
+              'trace41("CONNECTED',
+              'trace41("DISCONNECT',
+              'trace41("NOTIFY',
+              'trace41("RX4E',
+              'L41 '
+          ]:
+              assert token in after, f'missing Build41 token: {token}'
+
+          # Explicitly guarantee that the trace patch did not add another view, widget, transport,
+          # protocol write, calibration/session command or second BLE manager.
+          added = after.replace(before, '')
+          assert 'writeValue(' not in added
+          assert 'WidgetCenter.' not in added
+          assert 'WCSession' not in added
+          assert 'struct ' not in added
+          print('Build41 safety contract verified: only existing Direct-G7 BLE lifecycle instrumentation added.')
+          PY
+
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app and extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build41-ipa
+          mkdir -p /tmp/xdrip-build41-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build41-ipa
+          WATCH_APP="$(find /tmp/xdrip-build41-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          codesign --verify --deep --strict "$WATCH_APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          echo 'Build41 packaged Watch app and extension verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build41-ble-lifecycle-trace-artifacts
+          path: |
+            artifacts
+            buildlog
