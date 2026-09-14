@@ -1,0 +1,157 @@
+name: Personal xDrip G7 Watch Build 35
+run-name: G7 Watch Build 35 Circular Widgets (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build35_circular_widgets.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 35
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout historical source containing verified Watch chain
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: c4a3c3ff2ef117f350d91795b2154cc5191b36b1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout current patch scripts
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+          path: _build35_patches
+
+      - name: Apply verified working chain through Build 18
+        run: |
+          set -euo pipefail
+          P="_build35_patches/.github/scripts"
+          python3 "$P/apply_personal_watch_phase1.py"
+          python3 "$P/apply_g7_watch_ble_diagnostic.py"
+          python3 "$P/apply_g7_watch_auth_probe_and_stale_safety.py"
+          python3 "$P/apply_g7_watch_auth_telemetry.py"
+          python3 "$P/apply_g7_watch_build11_discovery.py"
+          python3 "$P/apply_g7_watch_build12_multiwindow.py"
+          python3 "$P/apply_g7_watch_build13_notify_listener.py"
+          python3 "$P/apply_g7_watch_build14_passive_decoder.py"
+          python3 "$P/apply_g7_watch_build15_multicycle_validation.py"
+          python3 "$P/apply_g7_watch_build16_complication_refresh.py"
+          python3 "$P/apply_g7_watch_build16_compile_fixes.py"
+          python3 "$P/apply_g7_watch_build17_ultra_layout.py"
+          python3 "$P/apply_g7_watch_build18_ultra_fullarea.py"
+
+      - name: Reproduce approved Build 34 graph
+        run: |
+          set -euo pipefail
+          python3 _build35_patches/.github/scripts/apply_g7_watch_build34_graph_only.py
+
+      - name: Add Build 35 circular glucose widgets
+        run: |
+          set -euo pipefail
+          python3 _build35_patches/.github/scripts/apply_g7_watch_build35_circular_widgets.py
+
+      - name: Verify Build 35 contract
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          widget = Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          rectangular = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
+          circular = Path('xDrip Watch Complication/Views/AccessoryCircularView.swift').read_text(encoding='utf-8')
+          app = Path('xDrip Watch App/xDripWatchApp.swift').read_text(encoding='utf-8')
+
+          assert 'let kind: String = "xDripGraphV33"' in widget
+          assert '.supportedFamilies([.accessoryRectangular, .accessoryCircular])' in widget
+          assert '.configurationDisplayName("xDrip")' in widget
+          assert 'CurrentGlucosePanel' not in rectangular
+          assert 'private let minimumMgDl = 40.0' in rectangular
+          assert 'private let maximumMgDl = 220.0' in rectangular
+          assert 'private let visibleDuration: TimeInterval = 2 * 60 * 60' in rectangular
+          assert 'size: 9.0' in rectangular
+          assert 'bgValueStringInUserChosenUnit()' in circular
+          assert 'trendArrow()' in circular
+          assert 'deltaChangeStringInUserChosenUnit()' in circular
+          assert 'bgReadingDate?.formatted' in circular
+          assert 'size: entry.widgetState.isSmallScreen() ? 17 : 20' in circular
+          assert 'size: entry.widgetState.isSmallScreen() ? 8 : 10' in circular
+          assert 'ComplicationController' not in app
+          assert 'CLKComplicationDataSource' not in app
+          print('Build35 verified: Build34 graph preserved; circular xDrip status enabled.')
+          PY
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch WidgetKit extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build35-ipa
+          mkdir -p /tmp/xdrip-build35-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build35-ipa
+          WATCH_APP="$(find /tmp/xdrip-build35-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          EXT_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          strings "$EXT/$EXT_EXEC" > /tmp/build35-ext-strings.txt
+          grep -Fq 'xDripGraphV33' /tmp/build35-ext-strings.txt
+          grep -Fq 'Glucose graph or compact glucose status' /tmp/build35-ext-strings.txt
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo 'Build35 packaged watch app verified.'
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build35-circular-widgets-artifacts
+          path: |
+            artifacts
+            buildlog
