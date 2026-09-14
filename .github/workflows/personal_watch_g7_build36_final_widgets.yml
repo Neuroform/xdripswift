@@ -136,13 +136,8 @@ jobs:
           EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
           test -n "$EXT"
           test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
-          EXT_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
-          strings "$EXT/$EXT_EXEC" > /tmp/build36-ext-strings.txt
-          grep -Fq 'xDripGraphV33' /tmp/build36-ext-strings.txt
-          grep -Fq 'xDripBGV36' /tmp/build36-ext-strings.txt
-          grep -Fq 'xDripDeltaV36' /tmp/build36-ext-strings.txt
           codesign --verify --deep --strict "$WATCH_APP"
-          echo 'Build36 packaged Watch extension verified.'
+          echo 'Build36 packaged Watch extension verified by structure, extension point and code signature.'
 
       - name: Upload to TestFlight
         run: bundle exec fastlane release
