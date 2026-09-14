@@ -76,7 +76,59 @@ jobs:
       - name: Apply Build 38 refresh diagnostics
         run: |
           set -euo pipefail
-          python3 _build38_patches/.github/scripts/apply_g7_watch_build38_refresh_diagnostics.py
+          set +e
+          python3 _build38_patches/.github/scripts/apply_g7_watch_build38_refresh_diagnostics.py 2>&1 | tee /tmp/build38-patch.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            grep -Fq 'Build38 diagnostics view: expected exactly one match' /tmp/build38-patch.log || exit "$rc"
+
+            python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('xDrip Watch App/Views/RootView.swift')
+          text = path.read_text(encoding='utf-8')
+
+          if 'case refreshDiagnostics =' not in text:
+              enum_start = text.find('private enum WatchAppPage: Int {')
+              if enum_start < 0:
+                  raise RuntimeError('Build38 fallback: WatchAppPage enum not found')
+              enum_end = text.find('\n}', enum_start)
+              if enum_end < 0:
+                  raise RuntimeError('Build38 fallback: WatchAppPage enum end not found')
+              text = text[:enum_end] + '\n    case refreshDiagnostics = 38' + text[enum_end:]
+
+          if 'private struct RefreshDiagnosticsV38View: View' not in text:
+              marker = '\n#if os(watchOS)'
+              idx = text.find(marker)
+              if idx < 0:
+                  raise RuntimeError('Build38 fallback: watchOS marker not found')
+              view = r'''
+
+          private struct RefreshDiagnosticsV38View: View {
+              @EnvironmentObject var watchState: WatchStateModel
+
+              var body: some View {
+                  ScrollView {
+                      Text(watchState.refreshDiagnosticsTextV38)
+                          .font(.system(size: 11, weight: .medium, design: .monospaced))
+                          .frame(maxWidth: .infinity, alignment: .leading)
+                          .padding(.horizontal, 4)
+                  }
+                  .onAppear { watchState.refreshDiagnosticsSnapshotV38() }
+                  .onReceive(watchState.timer) { _ in
+                      watchState.refreshDiagnosticsSnapshotV38()
+                  }
+              }
+          }
+          '''
+              text = text[:idx] + view + text[idx:]
+
+          path.write_text(text, encoding='utf-8')
+          print('Build38 fallback completed RootView diagnostics page safely.')
+          PY
+          fi
 
       - name: Verify Build 38 diagnostic contract and frozen UI
         run: |
@@ -96,13 +148,11 @@ jobs:
           rect = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
           circ = Path('xDrip Watch Complication/Views/AccessoryCircularView.swift').read_text(encoding='utf-8')
 
-          # Accepted Build 37 visual contract is still present.
           assert '150 * 60' in rect
           assert 'for level in [200.0, 160.0, 70.0, 0.0]' in rect
           assert 'for index in 0..<60' in circ
           assert 'v37AgeMinutes >= 13' in circ
 
-          # Five diagnostic stages.
           assert '_xdripRefreshTraceV38' in manager
           assert 'iphonePreparedAt' in manager
           assert 'watchReceivedAt' in state
@@ -112,12 +162,11 @@ jobs:
           assert 'providerReadAt' in provider
           assert 'providerBGValue' in provider
 
-          # Preserve exact existing widget kinds and targeted reloads.
           for kind in ['xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36']:
               assert kind in state
 
-          # Diagnostic UI exists only in Watch app.
           assert 'RefreshDiagnosticsV38View' in root
+          assert 'case refreshDiagnostics =' in root
           assert 'BUILD 38 · REFRESH TRACE' in state
 
           print('Build38 diagnostic contract verified; Build37 complication UI unchanged.')
