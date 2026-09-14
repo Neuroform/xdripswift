@@ -1,0 +1,163 @@
+name: Personal xDrip G7 Watch Build 39
+run-name: G7 Watch Build 39 Safe Refresh Trace (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build39_safe_refresh_trace.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 39
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout historical source containing verified Watch chain
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: c4a3c3ff2ef117f350d91795b2154cc5191b36b1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout current Build 39 patch scripts
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+          path: _build39_patches
+
+      - name: Apply verified working chain through Build 18
+        run: |
+          set -euo pipefail
+          P="_build39_patches/.github/scripts"
+          python3 "$P/apply_personal_watch_phase1.py"
+          python3 "$P/apply_g7_watch_ble_diagnostic.py"
+          python3 "$P/apply_g7_watch_auth_probe_and_stale_safety.py"
+          python3 "$P/apply_g7_watch_auth_telemetry.py"
+          python3 "$P/apply_g7_watch_build11_discovery.py"
+          python3 "$P/apply_g7_watch_build12_multiwindow.py"
+          python3 "$P/apply_g7_watch_build13_notify_listener.py"
+          python3 "$P/apply_g7_watch_build14_passive_decoder.py"
+          python3 "$P/apply_g7_watch_build15_multicycle_validation.py"
+          python3 "$P/apply_g7_watch_build16_complication_refresh.py"
+          python3 "$P/apply_g7_watch_build16_compile_fixes.py"
+          python3 "$P/apply_g7_watch_build17_ultra_layout.py"
+          python3 "$P/apply_g7_watch_build18_ultra_fullarea.py"
+
+      - name: Reproduce accepted Build 37
+        run: |
+          set -euo pipefail
+          P="_build39_patches/.github/scripts"
+          python3 "$P/apply_g7_watch_build34_graph_only.py"
+          python3 "$P/apply_g7_watch_build36_final_widgets.py"
+          python3 "$P/apply_g7_watch_build37_minute_tick_bezel.py"
+
+      - name: Freeze accepted launch and widget files
+        run: |
+          set -euo pipefail
+          shasum -a 256 'xDrip Watch App/Views/RootView.swift' > /tmp/build39-root.sha
+          shasum -a 256 'xDrip Watch Complication/Views/AccessoryRectangularView.swift' > /tmp/build39-rect.sha
+          shasum -a 256 'xDrip Watch Complication/Views/AccessoryCircularView.swift' > /tmp/build39-circ.sha
+          shasum -a 256 'xDrip Watch Complication/XDripWatchComplication.swift' > /tmp/build39-widget.sha
+
+      - name: Apply Build 39 safe refresh trace
+        run: |
+          set -euo pipefail
+          python3 _build39_patches/.github/scripts/apply_g7_watch_build39_safe_refresh_trace.py
+
+      - name: Verify Build 39 safety contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build39-root.sha
+          shasum -a 256 -c /tmp/build39-rect.sha
+          shasum -a 256 -c /tmp/build39-circ.sha
+          shasum -a 256 -c /tmp/build39-widget.sha
+
+          python3 - <<'PY'
+          from pathlib import Path
+          manager = Path('xDrip/Managers/Watch/WatchManager.swift').read_text(encoding='utf-8')
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          provider = Path('xDrip Watch Complication/XDripWatchComplication+Provider.swift').read_text(encoding='utf-8')
+          big = Path('xDrip Watch App/Views/BigNumberView/BigNumberView.swift').read_text(encoding='utf-8')
+          root = Path('xDrip Watch App/Views/RootView.swift').read_text(encoding='utf-8')
+
+          assert '_refreshTrace39' in manager
+          for token in ['recordRefreshTrace39', 'refreshTraceSummary39', 'appGroupBG', 'reloadAt']:
+              assert token in state
+          assert 'recordProviderRead39' in provider
+          assert 'providerBG' in provider
+          assert 'Text(watchState.refreshTraceSummary39())' in big
+          assert 'RefreshDiagnosticsV38View' not in root
+          assert 'refreshDiagnostics' not in root
+          print('Build39 safety contract verified: RootView and accepted complication files unchanged.')
+          PY
+
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app and extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build39-ipa
+          mkdir -p /tmp/xdrip-build39-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build39-ipa
+          WATCH_APP="$(find /tmp/xdrip-build39-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          codesign --verify --deep --strict "$WATCH_APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          echo 'Build39 packaged Watch app and extension verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build39-safe-refresh-trace-artifacts
+          path: |
+            artifacts
+            buildlog
