@@ -94,6 +94,8 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
+          import difflib
+
           before = Path('/tmp/build41-watchstate-before.swift').read_text(encoding='utf-8')
           after = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
 
@@ -111,13 +113,16 @@ jobs:
           ]:
               assert token in after, f'missing Build41 token: {token}'
 
-          # Explicitly guarantee that the trace patch did not add another view, widget, transport,
-          # protocol write, calibration/session command or second BLE manager.
-          added = after.replace(before, '')
+          # Examine only genuinely ADDED lines. The previous check incorrectly used
+          # after.replace(before, ''), which classified the whole modified file as added.
+          diff = difflib.ndiff(before.splitlines(), after.splitlines())
+          added_lines = [line[2:] for line in diff if line.startswith('+ ')]
+          added = '\n'.join(added_lines)
           assert 'writeValue(' not in added
           assert 'WidgetCenter.' not in added
           assert 'WCSession' not in added
           assert 'struct ' not in added
+          assert 'class G7DirectBLEManager' not in added
           print('Build41 safety contract verified: only existing Direct-G7 BLE lifecycle instrumentation added.')
           PY
 
