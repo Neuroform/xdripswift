@@ -1,0 +1,148 @@
+name: Personal xDrip G7 Watch Build 33
+run-name: G7 Watch Build 33 Fresh WidgetKit Kind (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build33_fresh_widget_kind.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 33
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout historical source containing pre-Build19 scripts
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: c4a3c3ff2ef117f350d91795b2154cc5191b36b1
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Apply original working chain only through Build 18
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_personal_watch_phase1.py
+          python3 .github/scripts/apply_g7_watch_ble_diagnostic.py
+          python3 .github/scripts/apply_g7_watch_auth_probe_and_stale_safety.py
+          python3 .github/scripts/apply_g7_watch_auth_telemetry.py
+          python3 .github/scripts/apply_g7_watch_build11_discovery.py
+          python3 .github/scripts/apply_g7_watch_build12_multiwindow.py
+          python3 .github/scripts/apply_g7_watch_build13_notify_listener.py
+          python3 .github/scripts/apply_g7_watch_build14_passive_decoder.py
+          python3 .github/scripts/apply_g7_watch_build15_multicycle_validation.py
+          python3 .github/scripts/apply_g7_watch_build16_complication_refresh.py
+          python3 .github/scripts/apply_g7_watch_build16_compile_fixes.py
+          python3 .github/scripts/apply_g7_watch_build17_ultra_layout.py
+          python3 .github/scripts/apply_g7_watch_build18_ultra_fullarea.py
+
+      - name: Assign fresh WidgetKit identity and rectangular family
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('xDrip Watch Complication/XDripWatchComplication.swift')
+          s = p.read_text(encoding='utf-8')
+          old_kind = 'let kind: String = "xDripWatchComplication"'
+          if s.count(old_kind) != 1:
+              raise RuntimeError(f'Expected exactly one original widget kind, found {s.count(old_kind)}')
+          s = s.replace(old_kind, 'let kind: String = "xDripGraphV33"', 1)
+          old = '''        .configurationDisplayName(ConstantsHomeView.applicationName)\n        .description("Show the current blood glucose level")\n        // Build 18: use every pixel WidgetKit exposes for the middle Ultra complication.\n        .contentMarginsDisabled()'''
+          new = '''        .configurationDisplayName("xDrip Graph")\n        .description("xDrip 2-hour glucose graph")\n        .supportedFamilies([.accessoryRectangular])\n        // Preserve Build 18 renderer; only the WidgetKit identity is fresh.\n        .contentMarginsDisabled()'''
+          if s.count(old) != 1:
+              raise RuntimeError(f'Expected exactly one original Build18 widget configuration, found {s.count(old)}')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+
+      - name: Verify isolated Build 33 registration change
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          widget = Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          app = Path('xDrip Watch App/xDripWatchApp.swift').read_text(encoding='utf-8')
+          assert '@main\nstruct XDripWatchComplication: Widget' in widget
+          assert 'let kind: String = "xDripGraphV33"' in widget
+          assert 'let kind: String = "xDripWatchComplication"' not in widget
+          assert '.supportedFamilies([.accessoryRectangular])' in widget
+          assert '.configurationDisplayName("xDrip Graph")' in widget
+          assert 'WidgetBundle' not in widget
+          assert 'xDripBGComplication' not in widget
+          assert 'xDripDeltaComplication' not in widget
+          assert 'ComplicationController' not in app
+          assert 'CLKComplicationDataSource' not in app
+          print('Build33 verified: Build18 single WidgetKit complication with fresh xDripGraphV33 kind and rectangular family only.')
+          PY
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build & Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch WidgetKit extension and fresh kind
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build33-ipa
+          mkdir -p /tmp/xdrip-build33-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build33-ipa
+          WATCH_APP="$(find /tmp/xdrip-build33-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          EXT_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXT/Info.plist")"
+          strings "$EXT/$EXT_EXEC" > /tmp/build33-ext-strings.txt
+          grep -Fq 'xDripGraphV33' /tmp/build33-ext-strings.txt
+          grep -Fq 'xDrip Graph' /tmp/build33-ext-strings.txt
+          codesign --verify --deep --strict "$WATCH_APP"
+          echo 'Build33 packaged watch app verified: embedded WidgetKit extension contains fresh xDripGraphV33 kind.'
+
+      - name: Fastlane upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Upload build log, IPA and Symbol artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build33-fresh-widget-kind-artifacts
+          path: |
+            artifacts
+            buildlog
