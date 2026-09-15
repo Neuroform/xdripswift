@@ -1,0 +1,171 @@
+name: Personal xDrip G7 Watch Build 45
+run-name: G7 Watch Build 45 Bluetooth Alert Widget Bypass (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build45_bluetooth_alert_bypass.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 45
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout Build 43 direct-widget baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build43-direct-widget-bridge
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout current Build 45 patch only
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+          path: _build45_patch
+
+      - name: Verify proven baseline
+        run: |
+          set -euo pipefail
+          STATE='xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -Fq 'publishReadingDirectlyToWidgets(_ reading: DirectG7Reading)' "$STATE"
+          grep -Fq 'publishReadingDirectlyToWidgets(reading)' "$STATE"
+          grep -Fq 'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"' "$STATE"
+          grep -Fq 'setNotifyValue(true' "$STATE"
+          grep -Fq '<string>bluetooth-central</string>' 'xDrip-Watch-App-Info.plist'
+          grep -Fq 'xDripGraphV33' "$STATE"
+          grep -Fq 'xDripBGV36' "$STATE"
+          grep -Fq 'xDripDeltaV36' "$STATE"
+          echo 'Build 43 direct G7 + direct widget bypass baseline verified.'
+
+      - name: Apply Bluetooth alert bypass
+        run: |
+          set -euo pipefail
+          python3 _build45_patch/.github/scripts/apply_g7_watch_build45_bluetooth_alert_bypass.py
+
+      - name: Verify Build 45 contract
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          app = Path('xDrip Watch App/xDripWatchApp.swift').read_text(encoding='utf-8')
+          plist = Path('xDrip-Watch-App-Info.plist').read_text(encoding='utf-8')
+
+          required_state = [
+              'func handleDirectG7BluetoothAlert()',
+              'func handleBluetoothAlertWake()',
+              'BLUETOOTH_ALERT wake',
+              'knownPeripheralIDKey = "xdrip.g7Direct.knownPeripheralID.build45"',
+              'retrievePeripherals(withIdentifiers:',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"',
+              'setNotifyValue(true',
+              'publishReadingDirectlyToWidgets(reading)',
+              'WidgetCenter.shared.reloadTimelines(ofKind:',
+              'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36'
+          ]
+          for token in required_state:
+              assert token in state, f'missing Build 45 state requirement: {token}'
+
+          assert '.backgroundTask(.bluetoothAlert)' in app
+          assert 'await watchState.handleDirectG7BluetoothAlert()' in app
+          assert '<string>bluetooth-central</string>' in plist
+
+          # Critical ordering: valid 0x4E is written to widgets before the existing auth/UI-state gate.
+          receive = state.split('guard characteristic.uuid == controlUUID, value[0] == 0x4E else { return }', 1)[1]
+          assert receive.index('publishReadingDirectlyToWidgets(reading)') < receive.index('guard authenticated else')
+
+          # No delayed reconnect timer in production Direct-G7 manager.
+          manager = state.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          reconnect = manager.split('private func scheduleReconnect()', 1)[1].split('func handleBluetoothAlertWake()', 1)[0]
+          assert 'asyncAfter' not in reconnect
+          assert 'beginDiscovery()' in reconnect
+
+          print('Build 45 contract verified: Bluetooth alert wake -> existing Direct-G7 subscription -> 0x4E -> direct App Group widget bypass.')
+          PY
+
+          changed="$(git diff --name-only | grep -v '^_build45_patch/' || true)"
+          expected=$'xDrip Watch App/DataModels/WatchStateModel.swift\nxDrip Watch App/xDripWatchApp.swift'
+          test "$changed" = "$expected"
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app and extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build45-ipa
+          mkdir -p /tmp/xdrip-build45-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build45-ipa
+          WATCH_APP="$(find /tmp/xdrip-build45-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          codesign --verify --deep --strict "$WATCH_APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          echo 'Build 45 packaged Watch app and complication extension verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 45 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build45-bluetooth-alert-bypass
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift' 'xDrip Watch App/xDripWatchApp.swift'
+          git commit -m 'Build 45: Bluetooth alert wake to direct G7 widget bypass'
+          git push origin HEAD:refs/heads/watch-build45-bluetooth-alert-bypass --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build45-bluetooth-alert-bypass-artifacts
+          path: |
+            artifacts
+            buildlog
