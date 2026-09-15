@@ -1,0 +1,237 @@
+name: Personal xDrip G7 Watch Build 49
+run-name: G7 Watch Build 49 System AutoReconnect (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build49_system_autoreconnect.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 49
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout Build 48 baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build48-martins-xdrip-name
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Freeze completed UI widgets naming and transports
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch App/xDripWatchApp.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist' \
+            'xDrip/xDrip.xcconfig' \
+            'xDrip/Supporting Files/Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build49-frozen.sha
+          done
+
+      - name: Apply system-owned G7 AutoReconnect
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('xDrip Watch App/DataModels/WatchStateModel.swift')
+          text = p.read_text(encoding='utf-8')
+          a = text.find('// MARK: - Direct G7 BLE manager')
+          b = text.find('// MARK: - WCSession delegate', a)
+          if a < 0 or b <= a:
+              raise RuntimeError('Direct G7 manager markers not found')
+          m = text[a:b]
+
+          def rep(old, new, label):
+              global m
+              n = m.count(old)
+              if n != 1:
+                  raise RuntimeError(f'{label}: expected exactly one match, found {n}')
+              m = m.replace(old, new, 1)
+
+          rep(
+              '    private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"\n',
+              '''    private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"\n\n    // Build 49: Heart-rate-monitor-style connection ownership. Once a real 0x4E packet has\n    // verified the G7 peripheral, CoreBluetooth itself owns reconnects between the sensor's\n    // short five-minute radio windows. No Timer, delayed DispatchQueue retry or foreground UI\n    // activity is required for the verified peripheral.\n    private func verifiedPeripheralID() -> UUID? {\n        guard let stored = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey) else { return nil }\n        return UUID(uuidString: stored)\n    }\n\n    private func isVerifiedPeripheral(_ peripheral: CBPeripheral) -> Bool {\n        verifiedPeripheralID() == peripheral.identifier\n    }\n\n    private func registerVerifiedConnectionEvents(_ identifier: UUID) {\n        central.registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])\n        trace41("CONNECTION_EVENTS registered id=\\(identifier.uuidString)")\n    }\n\n    private func connectVerifiedWithSystemAutoReconnect(_ peripheral: CBPeripheral, reason: String) {\n        targetPeripheral = peripheral\n        peripheral.delegate = self\n        registerVerifiedConnectionEvents(peripheral.identifier)\n        trace41("AUTO_CONNECT request reason=\\(reason) state=\\(peripheral.state.rawValue)")\n        central.connect(\n            peripheral,\n            options: [CBConnectPeripheralOptionEnableAutoReconnect: true]\n        )\n    }\n''',
+              'insert Build49 autoreconnect helpers'
+          )
+
+          rep(
+              '''        if peripheral.state == .connected {\n            publish("G7 verbunden; registriere Notify erneut…")\n            peripheral.discoverServices([serviceUUID])\n        } else {\n            publish("G7 gefunden; verbinde…")\n            central.connect(peripheral, options: nil)\n        }''',
+              '''        if peripheral.state == .connected {\n            publish("G7 verbunden; registriere Notify erneut…")\n            if isVerifiedPeripheral(peripheral) {\n                registerVerifiedConnectionEvents(peripheral.identifier)\n            }\n            peripheral.discoverServices([serviceUUID])\n        } else if isVerifiedPeripheral(peripheral) {\n            publish("Verifiziertes G7 gefunden; System-AutoReconnect…")\n            connectVerifiedWithSystemAutoReconnect(peripheral, reason: "inspect-known")\n        } else {\n            publish("G7 gefunden; verbinde zur Verifizierung…")\n            central.connect(peripheral, options: nil)\n        }''',
+              'verified inspect connection'
+          )
+
+          rep(
+              '''            if peripheral.state == .connected {\n                peripheral.discoverServices([serviceUUID])\n            } else if peripheral.state == .disconnected {\n                central.connect(peripheral, options: nil)\n            }\n            return''',
+              '''            if peripheral.state == .connected {\n                peripheral.discoverServices([serviceUUID])\n            } else if peripheral.state == .disconnected {\n                if isVerifiedPeripheral(peripheral) {\n                    connectVerifiedWithSystemAutoReconnect(peripheral, reason: "bluetooth-alert")\n                } else {\n                    central.connect(peripheral, options: nil)\n                }\n            }\n            return''',
+              'bluetooth alert verified connection'
+          )
+
+          old_restore = '''        if let peripheral = restored.first(where: { $0.state == .connected }) ?? restored.first {\n            targetPeripheral = peripheral\n            peripheral.delegate = self\n            lastDeviceName = peripheral.name ?? "unbekannt"\n            authenticated = false\n            publish("G7-Verbindung wiederhergestellt")\n\n            if peripheral.state == .connected {\n                peripheral.discoverServices([serviceUUID])\n            } else {\n                central.connect(peripheral, options: nil)\n            }\n            return\n        }'''
+          new_restore = '''        let verifiedID = verifiedPeripheralID()\n        let restoredPeripheral = restored.first(where: { peripheral in\n            verifiedID != nil && peripheral.identifier == verifiedID\n        }) ?? restored.first(where: { $0.state == .connected }) ?? restored.first\n\n        if let peripheral = restoredPeripheral {\n            targetPeripheral = peripheral\n            peripheral.delegate = self\n            lastDeviceName = peripheral.name ?? "unbekannt"\n            authenticated = false\n            publish("G7-Verbindung wiederhergestellt")\n\n            if isVerifiedPeripheral(peripheral) {\n                registerVerifiedConnectionEvents(peripheral.identifier)\n            }\n\n            if peripheral.state == .connected {\n                peripheral.discoverServices([serviceUUID])\n            } else if isVerifiedPeripheral(peripheral) {\n                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "state-restoration")\n            } else {\n                central.connect(peripheral, options: nil)\n            }\n            return\n        }'''
+          rep(old_restore, new_restore, 'state restoration prefers verified peripheral')
+
+          rep(
+              '''    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {\n        trace41("CONNECTED \\(peripheral.name ?? \"unknown\")")\n        lastDeviceName = peripheral.name ?? lastDeviceName\n        publish("BLE verbunden; prüfe G7-Service…")\n        armAuthenticationTimeout(for: peripheral)\n        peripheral.discoverServices([serviceUUID])\n    }''',
+              '''    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {\n        trace41("CONNECTED \\(peripheral.name ?? \"unknown\") verified=\\(isVerifiedPeripheral(peripheral))")\n        targetPeripheral = peripheral\n        peripheral.delegate = self\n        lastDeviceName = peripheral.name ?? lastDeviceName\n        if isVerifiedPeripheral(peripheral) {\n            registerVerifiedConnectionEvents(peripheral.identifier)\n        }\n        publish("BLE verbunden; prüfe G7-Service…")\n        armAuthenticationTimeout(for: peripheral)\n        peripheral.discoverServices([serviceUUID])\n    }''',
+              'didConnect retains verified peripheral'
+          )
+
+          rep(
+              '''    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {\n        trace41("CONNECT_FAIL err=\\(error?.localizedDescription ?? \"nil\")")\n        if targetPeripheral?.identifier == peripheral.identifier {\n            targetPeripheral = nil\n        }\n        authenticated = false\n        publish("Verbindung fehlgeschlagen; neuer Versuch…")\n        scheduleReconnect()\n    }''',
+              '''    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {\n        trace41("CONNECT_FAIL err=\\(error?.localizedDescription ?? \"nil\") verified=\\(isVerifiedPeripheral(peripheral))")\n        authenticated = false\n\n        if isVerifiedPeripheral(peripheral) {\n            targetPeripheral = peripheral\n            publish("Verifiziertes G7 noch nicht erreichbar; System-Verbindung bleibt registriert")\n            if central.state == .poweredOn, peripheral.state == .disconnected {\n                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "connect-failed")\n            }\n            return\n        }\n\n        if targetPeripheral?.identifier == peripheral.identifier {\n            targetPeripheral = nil\n        }\n        publish("Unbestätigte Verbindung fehlgeschlagen; Recovery-Scan…")\n        scheduleReconnect()\n    }''',
+              'didFailToConnect verified retry'
+          )
+
+          old_disconnect = '''    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {\n        trace41("DISCONNECT err=\\(error?.localizedDescription ?? \"nil\") state=\\(peripheral.state.rawValue)")\n        guard targetPeripheral?.identifier == peripheral.identifier else { return }\n\n        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        authenticated = false\n        pendingGlucosePacket = nil\n        peripheral.delegate = self\n\n        if let storedID = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey),\n           let verifiedID = UUID(uuidString: storedID),\n           verifiedID == peripheral.identifier {\n            targetPeripheral = peripheral\n            trace41("PENDING_CONNECT verified id=\\(peripheral.identifier.uuidString)")\n            publish("G7-Fenster beendet; pending reconnect registriert")\n            if central.state == .poweredOn, peripheral.state == .disconnected {\n                central.connect(peripheral, options: nil)\n            }\n            return\n        }\n\n        targetPeripheral = nil\n        publish("Unbestätigtes G7 getrennt; Recovery-Scan…")\n        scheduleReconnect()\n    }'''
+          new_disconnect = '''    // Legacy disconnect callback remains as a fallback. Verified G7 links are immediately\n    // re-registered with CoreBluetooth AutoReconnect rather than returning to scanning.\n    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {\n        trace41("DISCONNECT_LEGACY err=\\(error?.localizedDescription ?? \"nil\") state=\\(peripheral.state.rawValue)")\n        guard targetPeripheral?.identifier == peripheral.identifier else { return }\n\n        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        authenticated = false\n        pendingGlucosePacket = nil\n        peripheral.delegate = self\n\n        if isVerifiedPeripheral(peripheral) {\n            targetPeripheral = peripheral\n            publish("G7-Fenster beendet; System-AutoReconnect registriert")\n            if central.state == .poweredOn, peripheral.state == .disconnected {\n                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "legacy-disconnect")\n            }\n            return\n        }\n\n        targetPeripheral = nil\n        publish("Unbestätigtes G7 getrennt; Recovery-Scan…")\n        scheduleReconnect()\n    }\n\n    // watchOS 10+ CoreBluetooth callback used by CBConnectPeripheralOptionEnableAutoReconnect.\n    // If isReconnecting is true the operating system already owns the pending reconnect; do not\n    // scan, sleep, schedule a timer or issue a competing connection request.\n    @available(watchOS 10.0, *)\n    func centralManager(\n        _ central: CBCentralManager,\n        didDisconnectPeripheral peripheral: CBPeripheral,\n        timestamp: CFAbsoluteTime,\n        isReconnecting: Bool,\n        error: Error?\n    ) {\n        trace41("DISCONNECT_AUTO reconnecting=\\(isReconnecting) err=\\(error?.localizedDescription ?? \"nil\")")\n        guard targetPeripheral?.identifier == peripheral.identifier else { return }\n\n        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        authenticated = false\n        pendingGlucosePacket = nil\n        peripheral.delegate = self\n\n        if isVerifiedPeripheral(peripheral) {\n            targetPeripheral = peripheral\n            registerVerifiedConnectionEvents(peripheral.identifier)\n            if isReconnecting {\n                publish("G7-Fenster beendet; CoreBluetooth wartet automatisch auf nächsten Sensorzyklus")\n            } else if central.state == .poweredOn, peripheral.state == .disconnected {\n                publish("G7-Fenster beendet; AutoReconnect wird erneut registriert")\n                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "auto-disconnect-not-reconnecting")\n            }\n            return\n        }\n\n        targetPeripheral = nil\n        publish("Unbestätigtes G7 getrennt; Recovery-Scan…")\n        scheduleReconnect()\n    }\n\n    func centralManager(\n        _ central: CBCentralManager,\n        connectionEventDidOccur event: CBConnectionEvent,\n        for peripheral: CBPeripheral\n    ) {\n        guard isVerifiedPeripheral(peripheral) else { return }\n        targetPeripheral = peripheral\n        peripheral.delegate = self\n        let label: String\n        switch event {\n        case .peerConnected:\n            label = "peerConnected"\n        case .peerDisconnected:\n            label = "peerDisconnected"\n        @unknown default:\n            label = "unknown"\n        }\n        trace41("CONNECTION_EVENT \\(label) state=\\(peripheral.state.rawValue)")\n    }'''
+          rep(old_disconnect, new_disconnect, 'system autoreconnect disconnect callbacks')
+
+          rep(
+              '''        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n        trace41("VERIFIED_SOURCE id=\\(peripheral.identifier.uuidString)")''',
+              '''        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n        registerVerifiedConnectionEvents(peripheral.identifier)\n        trace41("VERIFIED_SOURCE id=\\(peripheral.identifier.uuidString) autoreconnect=armed")''',
+              'arm system connection events after valid 0x4E'
+          )
+
+          required = [
+              'CBConnectPeripheralOptionEnableAutoReconnect: true',
+              'didDisconnectPeripheral peripheral: CBPeripheral,\n        timestamp: CFAbsoluteTime,\n        isReconnecting: Bool',
+              'registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])',
+              'CONNECTION_EVENT',
+              'publishReadingDirectlyToWidgets(reading)',
+              'WIDGET_WRITE seq=',
+              'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"',
+              'setNotifyValue(true'
+          ]
+          for token in required:
+              if token not in m:
+                  raise RuntimeError(f'missing Build49 contract token: {token}')
+
+          text = text[:a] + m + text[b:]
+          p.write_text(text, encoding='utf-8')
+          print('Build 49 system AutoReconnect patch applied.')
+          PY
+
+      - name: Verify Build 49 contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build49-frozen.sha
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          m = s.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          for token in [
+              'CBConnectPeripheralOptionEnableAutoReconnect: true',
+              'connectVerifiedWithSystemAutoReconnect',
+              'registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])',
+              'isReconnecting: Bool',
+              'DISCONNECT_AUTO reconnecting=',
+              'CONNECTION_EVENT',
+              'publishReadingDirectlyToWidgets(reading)',
+              'WIDGET_WRITE seq=',
+              'setNotifyValue(true',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"'
+          ]:
+              assert token in m, token
+          # No timer/sleep loop is introduced for the verified G7 path.
+          assert 'Timer.scheduledTimer' not in m
+          assert 'Thread.sleep' not in m
+          assert 'usleep(' not in m
+          print('Build 49 event-driven AutoReconnect contract verified.')
+          PY
+          changed="$(git diff --name-only)"
+          test "$changed" = 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app extension and preserved name
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build49-ipa && mkdir -p /tmp/xdrip-build49-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build49-ipa
+          APP="$(find /tmp/xdrip-build49-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
+          python3 - "$APP/Info.plist" "$WATCH_APP/Info.plist" <<'PY'
+          import plistlib, sys
+          expected = "Martin\u2018s xDrip"
+          with open(sys.argv[1], 'rb') as f: phone = plistlib.load(f)
+          with open(sys.argv[2], 'rb') as f: watch = plistlib.load(f)
+          assert phone.get('CFBundleDisplayName') == expected, phone.get('CFBundleDisplayName')
+          assert watch.get('CFBundleDisplayName') == expected, watch.get('CFBundleDisplayName')
+          print('Build49 packaged app names preserved:', expected)
+          PY
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 49 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build49-system-autoreconnect
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git commit -m 'Build 49: system-owned G7 auto reconnect for event-driven widgets'
+          git push origin HEAD:refs/heads/watch-build49-system-autoreconnect --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build49-system-autoreconnect-artifacts
+          path: |
+            artifacts
+            buildlog
