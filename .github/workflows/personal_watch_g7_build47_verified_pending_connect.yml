@@ -1,0 +1,174 @@
+name: Personal xDrip G7 Watch Build 47
+run-name: G7 Watch Build 47 Verified Pending Connect (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build47_verified_pending_connect.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 47
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout Build 46 baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build46-persistent-notify-stream
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Freeze completed UI widgets and transports
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch App/xDripWatchApp.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build47-frozen.sha
+          done
+
+      - name: Apply verified G7 pending reconnect
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('xDrip Watch App/DataModels/WatchStateModel.swift')
+          text = p.read_text(encoding='utf-8')
+          a = text.find('// MARK: - Direct G7 BLE manager')
+          b = text.find('// MARK: - WCSession delegate', a)
+          assert a >= 0 and b > a
+          m = text[a:b]
+
+          def rep(old, new, label):
+              global m
+              n = m.count(old)
+              if n != 1:
+                  raise RuntimeError(f'{label}: expected 1 match, found {n}')
+              m = m.replace(old, new, 1)
+
+          rep('private let knownPeripheralIDKey = "xdrip.g7Direct.knownPeripheralID.build45"',
+              'private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"',
+              'verified key')
+          assert m.count('knownPeripheralIDKey') == 3
+          m = m.replace('knownPeripheralIDKey', 'verifiedPeripheralIDKey')
+
+          rep('''            lastDeviceName = peripheral.name ?? "unbekannt"\n            authenticated = false\n            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n            publish("G7-Verbindung wiederhergestellt")''',
+              '''            lastDeviceName = peripheral.name ?? "unbekannt"\n            authenticated = false\n            publish("G7-Verbindung wiederhergestellt")''',
+              'restoration verification')
+
+          rep('''        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n\n        guard let reading = parseG7Glucose(value) else {''',
+              '''        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n        trace41("VERIFIED_SOURCE id=\\(peripheral.identifier.uuidString)")\n\n        guard let reading = parseG7Glucose(value) else {''',
+              'verified 0x4E source')
+
+          old = '''    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {\n        trace41("DISCONNECT err=\\(error?.localizedDescription ?? \"nil\") state=\\(peripheral.state.rawValue)")\n        guard targetPeripheral?.identifier == peripheral.identifier else { return }\n\n        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        targetPeripheral = nil\n        authenticated = false\n        pendingGlucosePacket = nil\n        publish("G7 getrennt; verbinde erneut…")\n        scheduleReconnect()\n    }'''
+          new = '''    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {\n        trace41("DISCONNECT err=\\(error?.localizedDescription ?? \"nil\") state=\\(peripheral.state.rawValue)")\n        guard targetPeripheral?.identifier == peripheral.identifier else { return }\n\n        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        authenticated = false\n        pendingGlucosePacket = nil\n        peripheral.delegate = self\n\n        if let storedID = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey),\n           let verifiedID = UUID(uuidString: storedID),\n           verifiedID == peripheral.identifier {\n            targetPeripheral = peripheral\n            trace41("PENDING_CONNECT verified id=\\(peripheral.identifier.uuidString)")\n            publish("G7-Fenster beendet; pending reconnect registriert")\n            if central.state == .poweredOn, peripheral.state == .disconnected {\n                central.connect(peripheral, options: nil)\n            }\n            return\n        }\n\n        targetPeripheral = nil\n        publish("Unbestätigtes G7 getrennt; Recovery-Scan…")\n        scheduleReconnect()\n    }'''
+          rep(old, new, 'verified pending reconnect')
+
+          for token in ['publishReadingDirectlyToWidgets(reading)', 'AUTH watchdog bypassed; keep notify subscription alive',
+                        'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"', 'setNotifyValue(true',
+                        'VERIFIED_SOURCE id=', 'PENDING_CONNECT verified id=', 'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36']:
+              assert token in m, token
+
+          text = text[:a] + m + text[b:]
+          p.write_text(text, encoding='utf-8')
+          print('Build 47 patch applied.')
+          PY
+
+      - name: Verify Build 47 contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build47-frozen.sha
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text()
+          m = s.split('// MARK: - Direct G7 BLE manager',1)[1].split('// MARK: - WCSession delegate',1)[0]
+          assert 'verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"' in m
+          assert 'knownPeripheralIDKey' not in m
+          d = m.split('didDisconnectPeripheral peripheral: CBPeripheral, error: Error?)',1)[1].split('func peripheral(_ peripheral: CBPeripheral, didDiscoverServices',1)[0]
+          assert 'targetPeripheral = peripheral' in d
+          assert 'PENDING_CONNECT verified id=' in d
+          assert 'central.connect(peripheral, options: nil)' in d
+          assert 'publishReadingDirectlyToWidgets(reading)' in m
+          assert 'setNotifyValue(true' in m
+          assert 'AUTH watchdog bypassed; keep notify subscription alive' in m
+          r = m.split('willRestoreState dict:',1)[1].split('func centralManager(',1)[0]
+          assert 'UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)' not in r
+          print('Build 47 contract verified.')
+          PY
+          changed="$(git diff --name-only)"
+          test "$changed" = 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+      - name: Install Project Dependencies
+        run: bundle install
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      - name: Verify packaged Watch app and extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build47-ipa && mkdir -p /tmp/xdrip-build47-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build47-ipa
+          WATCH_APP="$(find /tmp/xdrip-build47-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          codesign --verify --deep --strict "$WATCH_APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      - name: Publish Build 47 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build47-verified-pending-connect
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git commit -m 'Build 47: retain verified G7 pending reconnect between sensor windows'
+          git push origin HEAD:refs/heads/watch-build47-verified-pending-connect --force
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build47-verified-pending-connect-artifacts
+          path: |
+            artifacts
+            buildlog
