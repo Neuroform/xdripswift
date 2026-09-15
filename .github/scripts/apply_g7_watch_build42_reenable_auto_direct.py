@@ -60,4 +60,15 @@ replace_once(
     "Build42 restore Direct-G7 CoreBluetooth state restoration",
 )
 
-print("Build 42 applied: automatic Direct-G7 startup + CoreBluetooth restoration re-enabled; Build 37 UI/widgets untouched.")
+# Make the Watch target explicitly eligible for CoreBluetooth central background execution.
+# This is part of the permanent functional baseline, not temporary diagnostic state.
+plist = Path("xDrip-Watch-App-Info.plist")
+plist_text = plist.read_text(encoding="utf-8")
+if "<string>bluetooth-central</string>" not in plist_text:
+    marker = "\t<key>MainAppBundleIdentifier</key>\n\t<string>$(MAIN_APP_BUNDLE_IDENTIFIER)</string>\n"
+    replacement = marker + "\t<key>UIBackgroundModes</key>\n\t<array>\n\t\t<string>bluetooth-central</string>\n\t</array>\n"
+    if marker not in plist_text:
+        raise RuntimeError("Build42 Watch plist: insertion marker not found")
+    plist.write_text(plist_text.replace(marker, replacement, 1), encoding="utf-8")
+
+print("Build 42 applied: automatic Direct-G7 startup + CoreBluetooth restoration + bluetooth-central background mode enabled; Build 37 UI/widgets untouched.")
