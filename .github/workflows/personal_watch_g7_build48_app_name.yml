@@ -1,0 +1,172 @@
+name: Personal xDrip G7 Watch Build 48
+run-name: G7 Watch Build 48 Martin‘s xDrip (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build48_app_name.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 48
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout verified Build 47 baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build47-verified-pending-connect
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Freeze completed Watch UI and G7 logic
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch App/xDripWatchApp.swift' \
+            'xDrip Watch App/DataModels/WatchStateModel.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build48-frozen.sha
+          done
+
+      - name: Apply Build 48 app naming only
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          display_name = "Martin\u2018s xDrip"
+
+          config = Path('xDrip/xDrip.xcconfig')
+          text = config.read_text(encoding='utf-8')
+          old = 'MAIN_APP_DISPLAY_NAME = xDrip4iO5'
+          new = f'MAIN_APP_DISPLAY_NAME = {display_name}'
+          if text.count(old) != 1:
+              raise RuntimeError(f'xDrip.xcconfig: expected exactly one {old!r}')
+          config.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          info = Path('xDrip/Supporting Files/Info.plist')
+          text = info.read_text(encoding='utf-8')
+          typo = 'xDrip4iO5 uses NFC to scan Libre sensors.'
+          corrected = 'xDrip4iOS uses NFC to scan Libre sensors.'
+          if text.count(typo) != 1:
+              raise RuntimeError('Info.plist: expected exactly one xDrip4iO5 NFC usage string')
+          info.write_text(text.replace(typo, corrected, 1), encoding='utf-8')
+
+          print(f'Build 48 naming set to: {display_name}')
+          PY
+
+      - name: Verify Build 48 naming-only contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build48-frozen.sha
+          python3 - <<'PY'
+          from pathlib import Path
+          expected = "Martin\u2018s xDrip"
+          config = Path('xDrip/xDrip.xcconfig').read_text(encoding='utf-8')
+          info = Path('xDrip/Supporting Files/Info.plist').read_text(encoding='utf-8')
+          assert f'MAIN_APP_DISPLAY_NAME = {expected}' in config
+          assert 'MAIN_APP_DISPLAY_NAME = xDrip4iO5' not in config
+          assert 'xDrip4iO5' not in info
+          assert 'xDrip4iOS uses NFC to scan Libre sensors.' in info
+          print('Build 48 source naming contract verified.')
+          PY
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' 'xDrip/Supporting Files/Info.plist' 'xDrip/xDrip.xcconfig' | sort)"
+          test "$changed" = "$expected"
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged iPhone and Watch names
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build48-ipa && mkdir -p /tmp/xdrip-build48-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build48-ipa
+          APP="$(find /tmp/xdrip-build48-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP"
+          test -n "$WATCH_APP"
+          test -n "$EXT"
+          python3 - "$APP/Info.plist" "$WATCH_APP/Info.plist" <<'PY'
+          import plistlib, sys
+          expected = "Martin\u2018s xDrip"
+          with open(sys.argv[1], 'rb') as f:
+              phone = plistlib.load(f)
+          with open(sys.argv[2], 'rb') as f:
+              watch = plistlib.load(f)
+          assert phone.get('CFBundleDisplayName') == expected, phone.get('CFBundleDisplayName')
+          assert watch.get('CFBundleDisplayName') == expected, watch.get('CFBundleDisplayName')
+          nfc = phone.get('NFCReaderUsageDescription', '')
+          assert 'xDrip4iOS' in nfc and 'xDrip4iO5' not in nfc, nfc
+          print('Packaged names verified:', phone.get('CFBundleDisplayName'), '/', watch.get('CFBundleDisplayName'))
+          PY
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 48 naming baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build48-martins-xdrip-name
+          git add 'xDrip/xDrip.xcconfig' 'xDrip/Supporting Files/Info.plist'
+          git commit -m 'Build 48: rename iPhone and Watch app to Martin‘s xDrip'
+          git push origin HEAD:refs/heads/watch-build48-martins-xdrip-name --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build48-martins-xdrip-artifacts
+          path: |
+            artifacts
+            buildlog
