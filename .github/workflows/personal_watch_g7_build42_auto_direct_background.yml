@@ -96,9 +96,9 @@ jobs:
           for token in required:
               assert token in state, f'missing permanent Build42 function: {token}'
 
-          assert 'directG7Manager = nil' not in state
-          assert 'Auto-Direct aus · Auth-Test bereit' not in state
-          assert '<string>bluetooth-central</string>' in plist
+          assert 'directG7Manager = nil' not in state, 'Auto-Direct manager remains disabled'
+          assert 'Auto-Direct aus · Auth-Test bereit' not in state, 'Disabled Auto-Direct startup status remains'
+          assert '<string>bluetooth-central</string>' in plist, 'Watch bluetooth-central background mode missing'
           assert 'xDripGraphV33' in provider or 'xDripGraphV33' in Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
           assert '150' in graph
           assert '60' in circular
