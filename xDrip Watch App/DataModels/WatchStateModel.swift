@@ -2005,7 +2005,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var authTimeoutTask: DispatchWorkItem?
     private var reconnectTask: DispatchWorkItem?
     private var lastDeviceName = ""
-    private let knownPeripheralIDKey = "xdrip.g7Direct.knownPeripheralID.build45"
+    private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"
 
     // Build 41: persistent BLE lifecycle trace. This deliberately lives inside the existing
     // direct-G7 manager so no Watch UI or complication code needs to change.
@@ -2070,7 +2070,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         trace41("SCAN begin")
         publish("suche G7…")
 
-        if let storedID = UserDefaults.standard.string(forKey: knownPeripheralIDKey),
+        if let storedID = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey),
            let uuid = UUID(uuidString: storedID),
            let known = central.retrievePeripherals(withIdentifiers: [uuid]).first {
             inspect(known)
@@ -2328,7 +2328,6 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             peripheral.delegate = self
             lastDeviceName = peripheral.name ?? "unbekannt"
             authenticated = false
-            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralIDKey)
             publish("G7-Verbindung wiederhergestellt")
 
             if peripheral.state == .connected {
@@ -2379,10 +2378,24 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
 
         authTimeoutTask?.cancel()
         authTimeoutTask = nil
-        targetPeripheral = nil
         authenticated = false
         pendingGlucosePacket = nil
-        publish("G7 getrennt; verbinde erneut…")
+        peripheral.delegate = self
+
+        if let storedID = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey),
+           let verifiedID = UUID(uuidString: storedID),
+           verifiedID == peripheral.identifier {
+            targetPeripheral = peripheral
+            trace41("PENDING_CONNECT verified id=\(peripheral.identifier.uuidString)")
+            publish("G7-Fenster beendet; pending reconnect registriert")
+            if central.state == .poweredOn, peripheral.state == .disconnected {
+                central.connect(peripheral, options: nil)
+            }
+            return
+        }
+
+        targetPeripheral = nil
+        publish("Unbestätigtes G7 getrennt; Recovery-Scan…")
         scheduleReconnect()
     }
 
@@ -2461,7 +2474,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let seq41 = value.count >= 8 ? littleEndianUInt16(value, offset: 6) : 0
         let bg41 = value.count >= 14 ? Int(littleEndianUInt16(value, offset: 12) & 0x0FFF) : -1
         trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
-        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralIDKey)
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)
+        trace41("VERIFIED_SOURCE id=\(peripheral.identifier.uuidString)")
 
         guard let reading = parseG7Glucose(value) else {
             publish("0x4E empfangen; Parser abgelehnt")
