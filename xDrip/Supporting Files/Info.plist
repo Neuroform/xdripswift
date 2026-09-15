@@ -47,7 +47,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>42</string>
+	<string>48</string>
 	<key>INAlternativeAppNames</key>
 	<array>
 		<dict>
@@ -76,7 +76,7 @@
 	<key>MainAppBundleIdentifier</key>
 	<string>$(MAIN_APP_BUNDLE_IDENTIFIER)</string>
 	<key>NFCReaderUsageDescription</key>
-	<string>xDrip4iO5 uses NFC to scan Libre sensors.</string>
+	<string>xDrip4iOS uses NFC to scan Libre sensors.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
