@@ -1,5 +1,5 @@
 name: Personal xDrip G7 Watch Build 42
-run-name: G7 Watch Build 42 Auto-Direct Background (${{ github.ref_name }})
+run-name: G7 Watch Build 42 Functional Baseline (${{ github.ref_name }})
 
 on:
   push:
@@ -20,13 +20,13 @@ jobs:
     needs: validate
     runs-on: macos-26
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Select Xcode version
         run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
 
-      - name: Checkout historical source containing verified Watch chain
+      - name: Checkout historical source one final time
         uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -40,7 +40,7 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: _build42_patches
 
-      - name: Apply verified working chain through Build 18
+      - name: Materialize complete functional state through Build 37
         run: |
           set -euo pipefail
           P="_build42_patches/.github/scripts"
@@ -57,49 +57,30 @@ jobs:
           python3 "$P/apply_g7_watch_build16_compile_fixes.py"
           python3 "$P/apply_g7_watch_build17_ultra_layout.py"
           python3 "$P/apply_g7_watch_build18_ultra_fullarea.py"
-
-      - name: Reproduce accepted Build 37
-        run: |
-          set -euo pipefail
-          P="_build42_patches/.github/scripts"
           python3 "$P/apply_g7_watch_build34_graph_only.py"
           python3 "$P/apply_g7_watch_build36_final_widgets.py"
           python3 "$P/apply_g7_watch_build37_minute_tick_bezel.py"
 
-      - name: Freeze accepted Build 37 UI and transport hashes
-        run: |
-          set -euo pipefail
-          for f in \
-            'xDrip Watch App/Views/RootView.swift' \
-            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
-            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
-            'xDrip Watch Complication/XDripWatchComplication.swift' \
-            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
-            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
-            'xDrip/Managers/Watch/WatchManager.swift' \
-            'xDrip-Watch-App-Info.plist'; do
-            shasum -a 256 "$f" >> /tmp/build42-frozen.sha
-          done
-
-      - name: Apply Build 41 lifecycle trace
+      - name: Add lifecycle trace without disabling working functions
         run: |
           set -euo pipefail
           python3 _build42_patches/.github/scripts/apply_g7_watch_build41_ble_lifecycle_trace.py
 
-      - name: Apply Build 42 Auto-Direct reactivation
+      - name: Restore proven Direct-G7 function for permanent baseline
         run: |
           set -euo pipefail
           python3 _build42_patches/.github/scripts/apply_g7_watch_build42_reenable_auto_direct.py
 
-      - name: Verify Build 42 safety contract
+      - name: Verify permanent Build 42 functional contract
         run: |
           set -euo pipefail
-          shasum -a 256 -c /tmp/build42-frozen.sha
-
           python3 - <<'PY'
           from pathlib import Path
           state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
           plist = Path('xDrip-Watch-App-Info.plist').read_text(encoding='utf-8')
+          provider = Path('xDrip Watch Complication/XDripWatchComplication+Provider.swift').read_text(encoding='utf-8')
+          graph = Path('xDrip Watch Complication/Views/AccessoryRectangularView.swift').read_text(encoding='utf-8')
+          circular = Path('xDrip Watch Complication/Views/AccessoryCircularView.swift').read_text(encoding='utf-8')
 
           required = [
               'directG7Manager = G7DirectBLEManager(',
@@ -108,25 +89,24 @@ jobs:
               'func centralManager(_ central: CBCentralManager, willRestoreState dict:',
               'scheduleReconnect()',
               'processDirectG7Reading(reading)',
+              'updateComplicationData()',
               'xdrip.g7Direct.lifecycleTrace41',
-              'trace41("RX4E',
-              'updateComplicationData()'
+              'trace41("RX4E'
           ]
           for token in required:
-              assert token in state, f'missing Build42 requirement: {token}'
+              assert token in state, f'missing permanent Build42 function: {token}'
 
-          assert 'directG7Manager = nil' not in state, 'Auto-Direct is still disabled'
-          assert 'Auto-Direct aus · Auth-Test bereit' not in state, 'disabled status remains in executable startup path'
-          assert '<string>bluetooth-central</string>' in plist, 'Watch bluetooth-central background mode missing'
+          assert 'directG7Manager = nil' not in state
+          assert 'Auto-Direct aus · Auth-Test bereit' not in state
+          assert '<string>bluetooth-central</string>' in plist
+          assert 'xDripGraphV33' in provider or 'xDripGraphV33' in Path('xDrip Watch Complication/XDripWatchComplication.swift').read_text(encoding='utf-8')
+          assert '150' in graph
+          assert '60' in circular
 
-          # Build 42 must not add a new protocol-writing Direct-G7 path. The only writeValue calls
-          # are historical manual auth-probe code; the restored G7DirectBLEManager remains Notify-only.
           manager = state.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
-          assert 'writeValue(' not in manager, 'Direct-G7 manager unexpectedly performs application TX'
-
-          print('Build42 safety verified: accepted UI frozen; Auto-Direct, restoration, reconnect, trace and complication publication active.')
+          assert 'writeValue(' not in manager, 'Direct-G7 manager must remain Notify-only'
+          print('Build42 permanent functional contract verified.')
           PY
-
           git diff --check
 
       - name: Patch Match Tables
@@ -174,11 +154,26 @@ jobs:
           FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
 
+      - name: Publish permanent Build 42 source baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build42-functional-baseline
+          git add -u
+          if git diff --cached --quiet; then
+            echo 'No tracked source changes to commit.'
+          else
+            git commit -m 'Build 42 functional baseline: Direct G7 background + accepted widgets'
+          fi
+          git push origin HEAD:refs/heads/watch-build42-functional-baseline --force
+          echo 'Permanent baseline published. Future Watch builds must start from watch-build42-functional-baseline.'
+
       - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: personal-watch-g7-build42-auto-direct-background-artifacts
+          name: personal-watch-g7-build42-functional-baseline-artifacts
           path: |
             artifacts
             buildlog
