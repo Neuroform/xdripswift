@@ -9,6 +9,29 @@ def replace_once(path: Path, old: str, new: str, label: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def insert_once_in_direct_manager(path: Path, anchor: str, insertion: str, label: str) -> None:
+    """Insert only inside the proven G7DirectBLEManager block.
+
+    Build 42 contains other diagnostic BLE helpers with identically named utility methods.
+    Global text replacement is therefore intentionally forbidden here.
+    """
+    text = path.read_text(encoding="utf-8")
+    start_marker = "// MARK: - Direct G7 BLE manager"
+    end_marker = "// MARK: - WCSession delegate"
+    start = text.find(start_marker)
+    end = text.find(end_marker, start + len(start_marker))
+    if start < 0 or end < 0:
+        raise RuntimeError(f"{label}: Direct G7 manager boundaries not found in {path}")
+
+    manager = text[start:end]
+    count = manager.count(anchor)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected exactly one anchor inside Direct G7 manager, found {count}")
+
+    manager = manager.replace(anchor, insertion + anchor, 1)
+    path.write_text(text[:start] + manager + text[end:], encoding="utf-8")
+
+
 # Build 43 starts DIRECTLY from the permanent Build 42 functional baseline.
 # It does not touch any widget layout, widget registration, WatchConnectivity transport,
 # G7 parser, Direct-G7 discovery/reconnect/restoration code, or RootView.
@@ -127,10 +150,13 @@ bridge_methods = r'''
 
 '''
 
-replace_once(
+# Build 42 contains two littleEndianUInt16 helpers (Direct-G7 + manual auth diagnostics).
+# Anchor the insertion strictly inside the Direct-G7 manager to avoid the exact ambiguity
+# that caused Build 43 run #1 to stop before Xcode.
+insert_once_in_direct_manager(
     state,
     '''    private func littleEndianUInt16(_ data: Data, offset: Int) -> UInt16 {''',
-    bridge_methods + '''    private func littleEndianUInt16(_ data: Data, offset: Int) -> UInt16 {''',
+    bridge_methods,
     "insert direct widget bridge",
 )
 
@@ -178,6 +204,7 @@ new_receive = r'''        guard characteristic.uuid == controlUUID, value[0] == 
         publish("Direct BG \(Int(reading.glucoseMgDl)) mg/dL")
         onReading(reading)'''
 
+# This receive sequence is unique to the production Direct-G7 manager in Build 42.
 replace_once(state, old_receive, new_receive, "route 0x4E directly to widget bridge")
 
 print("Build 43 applied: every valid direct G7 0x4E packet now writes straight to App Group and reloads the existing widgets; UI/widgets unchanged.")
