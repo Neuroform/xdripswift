@@ -30,20 +30,20 @@ replace_in_manager(
 )
 
 replace_in_manager(
-    '''        reconnectTask?.cancel()\n        reconnectTask = nil\n        publish("suche G7…")\n\n        let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])''',
-    '''        reconnectTask?.cancel()\n        reconnectTask = nil\n        publish("suche G7…")\n\n        // Prefer the exact sensor that already delivered a valid direct G7 packet. Register the\n        // CoreBluetooth connect immediately; do not depend on the Watch UI being foreground.\n        if let storedID = UserDefaults.standard.string(forKey: knownPeripheralIDKey),\n           let uuid = UUID(uuidString: storedID),\n           let known = central.retrievePeripherals(withIdentifiers: [uuid]).first {\n            inspect(known)\n            return\n        }\n\n        let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])''',
+    '''        reconnectTask?.cancel()\n        reconnectTask = nil\n        trace41("SCAN begin")\n        publish("suche G7…")\n\n        let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])''',
+    '''        reconnectTask?.cancel()\n        reconnectTask = nil\n        trace41("SCAN begin")\n        publish("suche G7…")\n\n        // Prefer the exact sensor that already delivered a valid direct G7 packet. Register the\n        // CoreBluetooth connect immediately; do not depend on the Watch UI being foreground.\n        if let storedID = UserDefaults.standard.string(forKey: knownPeripheralIDKey),\n           let uuid = UUID(uuidString: storedID),\n           let known = central.retrievePeripherals(withIdentifiers: [uuid]).first {\n            inspect(known)\n            return\n        }\n\n        let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])''',
     "prefer known peripheral",
 )
 
 replace_in_manager(
-    '''        publish("G7 gefunden; verbinde…")\n        central.connect(peripheral, options: nil)''',
-    '''        if peripheral.state == .connected {\n            publish("G7 bereits verbunden; aktiviere Subscription…")\n            peripheral.discoverServices([serviceUUID])\n        } else {\n            publish("G7 gefunden; verbinde…")\n            // The connection itself is the durable CoreBluetooth operation. Once registered,\n            // watchOS can restore/wake this app for subsequent BLE events after initialization.\n            central.connect(peripheral, options: nil)\n        }''',
+    '''        trace41("DISCOVER \\(lastDeviceName) state=\\(peripheral.state.rawValue)")\n        publish("G7 gefunden; verbinde…")\n        central.connect(peripheral, options: nil)''',
+    '''        trace41("DISCOVER \\(lastDeviceName) state=\\(peripheral.state.rawValue)")\n        if peripheral.state == .connected {\n            publish("G7 bereits verbunden; aktiviere Subscription…")\n            peripheral.discoverServices([serviceUUID])\n        } else {\n            publish("G7 gefunden; verbinde…")\n            // The connection itself is the durable CoreBluetooth operation. Once registered,\n            // watchOS can restore/wake this app for subsequent BLE events after initialization.\n            central.connect(peripheral, options: nil)\n        }''',
     "durable connect registration",
 )
 
 replace_in_manager(
-    '''    private func scheduleReconnect() {\n        reconnectTask?.cancel()\n        let task = DispatchWorkItem { [weak self] in\n            guard let self, self.enabled, self.targetPeripheral == nil else { return }\n            self.beginDiscovery()\n        }\n        reconnectTask = task\n        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: task)\n    }''',
-    '''    private func scheduleReconnect() {\n        reconnectTask?.cancel()\n        reconnectTask = nil\n        guard enabled, central.state == .poweredOn, targetPeripheral == nil else { return }\n\n        // Do not rely on a delayed DispatchQueue timer: watchOS may suspend the app before it\n        // fires. Register the next CoreBluetooth operation immediately so the system owns it.\n        beginDiscovery()\n    }''',
+    '''    private func scheduleReconnect() {\n        trace41("RECONNECT scheduled")\n        reconnectTask?.cancel()\n        let task = DispatchWorkItem { [weak self] in\n            guard let self, self.enabled, self.targetPeripheral == nil else { return }\n            self.beginDiscovery()\n        }\n        reconnectTask = task\n        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: task)\n    }''',
+    '''    private func scheduleReconnect() {\n        trace41("RECONNECT immediate")\n        reconnectTask?.cancel()\n        reconnectTask = nil\n        guard enabled, central.state == .poweredOn, targetPeripheral == nil else { return }\n\n        // Do not rely on a delayed DispatchQueue timer: watchOS may suspend the app before it\n        // fires. Register the next CoreBluetooth operation immediately so the system owns it.\n        beginDiscovery()\n    }''',
     "replace timer reconnect with immediate CoreBluetooth registration",
 )
 
