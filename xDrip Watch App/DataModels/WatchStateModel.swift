@@ -2007,6 +2007,35 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var lastDeviceName = ""
     private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"
 
+    // Build 49: Heart-rate-monitor-style connection ownership. Once a real 0x4E packet has
+    // verified the G7 peripheral, CoreBluetooth itself owns reconnects between the sensor's
+    // short five-minute radio windows. No Timer, delayed DispatchQueue retry or foreground UI
+    // activity is required for the verified peripheral.
+    private func verifiedPeripheralID() -> UUID? {
+        guard let stored = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey) else { return nil }
+        return UUID(uuidString: stored)
+    }
+
+    private func isVerifiedPeripheral(_ peripheral: CBPeripheral) -> Bool {
+        verifiedPeripheralID() == peripheral.identifier
+    }
+
+    private func registerVerifiedConnectionEvents(_ identifier: UUID) {
+        central.registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])
+        trace41("CONNECTION_EVENTS registered id=\(identifier.uuidString)")
+    }
+
+    private func connectVerifiedWithSystemAutoReconnect(_ peripheral: CBPeripheral, reason: String) {
+        targetPeripheral = peripheral
+        peripheral.delegate = self
+        registerVerifiedConnectionEvents(peripheral.identifier)
+        trace41("AUTO_CONNECT request reason=\(reason) state=\(peripheral.state.rawValue)")
+        central.connect(
+            peripheral,
+            options: [CBConnectPeripheralOptionEnableAutoReconnect: true]
+        )
+    }
+
     // Build 41: persistent BLE lifecycle trace. This deliberately lives inside the existing
     // direct-G7 manager so no Watch UI or complication code needs to change.
     private let lifecycleTraceKey41 = "xdrip.g7Direct.lifecycleTrace41"
@@ -2101,9 +2130,15 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         trace41("DISCOVER \(lastDeviceName) state=\(peripheral.state.rawValue)")
         if peripheral.state == .connected {
             publish("G7 verbunden; registriere Notify erneut…")
+            if isVerifiedPeripheral(peripheral) {
+                registerVerifiedConnectionEvents(peripheral.identifier)
+            }
             peripheral.discoverServices([serviceUUID])
+        } else if isVerifiedPeripheral(peripheral) {
+            publish("Verifiziertes G7 gefunden; System-AutoReconnect…")
+            connectVerifiedWithSystemAutoReconnect(peripheral, reason: "inspect-known")
         } else {
-            publish("G7 gefunden; verbinde…")
+            publish("G7 gefunden; verbinde zur Verifizierung…")
             central.connect(peripheral, options: nil)
         }
     }
@@ -2130,7 +2165,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             if peripheral.state == .connected {
                 peripheral.discoverServices([serviceUUID])
             } else if peripheral.state == .disconnected {
-                central.connect(peripheral, options: nil)
+                if isVerifiedPeripheral(peripheral) {
+                    connectVerifiedWithSystemAutoReconnect(peripheral, reason: "bluetooth-alert")
+                } else {
+                    central.connect(peripheral, options: nil)
+                }
             }
             return
         }
@@ -2323,15 +2362,26 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         trace41("RESTORE count=\(restored.count) state=\(restoredState)")
         enabled = true
 
-        if let peripheral = restored.first(where: { $0.state == .connected }) ?? restored.first {
+        let verifiedID = verifiedPeripheralID()
+        let restoredPeripheral = restored.first(where: { peripheral in
+            verifiedID != nil && peripheral.identifier == verifiedID
+        }) ?? restored.first(where: { $0.state == .connected }) ?? restored.first
+
+        if let peripheral = restoredPeripheral {
             targetPeripheral = peripheral
             peripheral.delegate = self
             lastDeviceName = peripheral.name ?? "unbekannt"
             authenticated = false
             publish("G7-Verbindung wiederhergestellt")
 
+            if isVerifiedPeripheral(peripheral) {
+                registerVerifiedConnectionEvents(peripheral.identifier)
+            }
+
             if peripheral.state == .connected {
                 peripheral.discoverServices([serviceUUID])
+            } else if isVerifiedPeripheral(peripheral) {
+                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "state-restoration")
             } else {
                 central.connect(peripheral, options: nil)
             }
@@ -2355,25 +2405,42 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        trace41("CONNECTED \(peripheral.name ?? "unknown")")
+        trace41("CONNECTED \(peripheral.name ?? "unknown") verified=\(isVerifiedPeripheral(peripheral))")
+        targetPeripheral = peripheral
+        peripheral.delegate = self
         lastDeviceName = peripheral.name ?? lastDeviceName
+        if isVerifiedPeripheral(peripheral) {
+            registerVerifiedConnectionEvents(peripheral.identifier)
+        }
         publish("BLE verbunden; prüfe G7-Service…")
         armAuthenticationTimeout(for: peripheral)
         peripheral.discoverServices([serviceUUID])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        trace41("CONNECT_FAIL err=\(error?.localizedDescription ?? "nil")")
+        trace41("CONNECT_FAIL err=\(error?.localizedDescription ?? "nil") verified=\(isVerifiedPeripheral(peripheral))")
+        authenticated = false
+
+        if isVerifiedPeripheral(peripheral) {
+            targetPeripheral = peripheral
+            publish("Verifiziertes G7 noch nicht erreichbar; System-Verbindung bleibt registriert")
+            if central.state == .poweredOn, peripheral.state == .disconnected {
+                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "connect-failed")
+            }
+            return
+        }
+
         if targetPeripheral?.identifier == peripheral.identifier {
             targetPeripheral = nil
         }
-        authenticated = false
-        publish("Verbindung fehlgeschlagen; neuer Versuch…")
+        publish("Unbestätigte Verbindung fehlgeschlagen; Recovery-Scan…")
         scheduleReconnect()
     }
 
+    // Legacy disconnect callback remains as a fallback. Verified G7 links are immediately
+    // re-registered with CoreBluetooth AutoReconnect rather than returning to scanning.
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        trace41("DISCONNECT err=\(error?.localizedDescription ?? "nil") state=\(peripheral.state.rawValue)")
+        trace41("DISCONNECT_LEGACY err=\(error?.localizedDescription ?? "nil") state=\(peripheral.state.rawValue)")
         guard targetPeripheral?.identifier == peripheral.identifier else { return }
 
         authTimeoutTask?.cancel()
@@ -2382,14 +2449,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         pendingGlucosePacket = nil
         peripheral.delegate = self
 
-        if let storedID = UserDefaults.standard.string(forKey: verifiedPeripheralIDKey),
-           let verifiedID = UUID(uuidString: storedID),
-           verifiedID == peripheral.identifier {
+        if isVerifiedPeripheral(peripheral) {
             targetPeripheral = peripheral
-            trace41("PENDING_CONNECT verified id=\(peripheral.identifier.uuidString)")
-            publish("G7-Fenster beendet; pending reconnect registriert")
+            publish("G7-Fenster beendet; System-AutoReconnect registriert")
             if central.state == .poweredOn, peripheral.state == .disconnected {
-                central.connect(peripheral, options: nil)
+                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "legacy-disconnect")
             }
             return
         }
@@ -2397,6 +2461,63 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         targetPeripheral = nil
         publish("Unbestätigtes G7 getrennt; Recovery-Scan…")
         scheduleReconnect()
+    }
+
+    // watchOS 10+ CoreBluetooth callback used by CBConnectPeripheralOptionEnableAutoReconnect.
+    // If isReconnecting is true the operating system already owns the pending reconnect; do not
+    // scan, sleep, schedule a timer or issue a competing connection request.
+    @available(watchOS 10.0, *)
+    func centralManager(
+        _ central: CBCentralManager,
+        didDisconnectPeripheral peripheral: CBPeripheral,
+        timestamp: CFAbsoluteTime,
+        isReconnecting: Bool,
+        error: Error?
+    ) {
+        trace41("DISCONNECT_AUTO reconnecting=\(isReconnecting) err=\(error?.localizedDescription ?? "nil")")
+        guard targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        authTimeoutTask?.cancel()
+        authTimeoutTask = nil
+        authenticated = false
+        pendingGlucosePacket = nil
+        peripheral.delegate = self
+
+        if isVerifiedPeripheral(peripheral) {
+            targetPeripheral = peripheral
+            registerVerifiedConnectionEvents(peripheral.identifier)
+            if isReconnecting {
+                publish("G7-Fenster beendet; CoreBluetooth wartet automatisch auf nächsten Sensorzyklus")
+            } else if central.state == .poweredOn, peripheral.state == .disconnected {
+                publish("G7-Fenster beendet; AutoReconnect wird erneut registriert")
+                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "auto-disconnect-not-reconnecting")
+            }
+            return
+        }
+
+        targetPeripheral = nil
+        publish("Unbestätigtes G7 getrennt; Recovery-Scan…")
+        scheduleReconnect()
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        connectionEventDidOccur event: CBConnectionEvent,
+        for peripheral: CBPeripheral
+    ) {
+        guard isVerifiedPeripheral(peripheral) else { return }
+        targetPeripheral = peripheral
+        peripheral.delegate = self
+        let label: String
+        switch event {
+        case .peerConnected:
+            label = "peerConnected"
+        case .peerDisconnected:
+            label = "peerDisconnected"
+        @unknown default:
+            label = "unknown"
+        }
+        trace41("CONNECTION_EVENT \(label) state=\(peripheral.state.rawValue)")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -2475,7 +2596,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let bg41 = value.count >= 14 ? Int(littleEndianUInt16(value, offset: 12) & 0x0FFF) : -1
         trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)
-        trace41("VERIFIED_SOURCE id=\(peripheral.identifier.uuidString)")
+        registerVerifiedConnectionEvents(peripheral.identifier)
+        trace41("VERIFIED_SOURCE id=\(peripheral.identifier.uuidString) autoreconnect=armed")
 
         guard let reading = parseG7Glucose(value) else {
             publish("0x4E empfangen; Parser abgelehnt")
