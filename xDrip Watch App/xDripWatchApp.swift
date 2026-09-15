@@ -22,6 +22,9 @@ struct xDrip_Watch_AppApp: App {
                 RootView()
             }.environmentObject(watchState)
         }
+        .backgroundTask(.bluetoothAlert) {
+            await watchState.handleDirectG7BluetoothAlert()
+        }
         
         // assign the custom view controller to show all watch notifications with snoozeCategory (which will be most of them)
         #if canImport(WatchKit)

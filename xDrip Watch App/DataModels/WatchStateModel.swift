@@ -188,6 +188,14 @@ final class WatchStateModel: NSObject, ObservableObject {
         directG7Manager?.start()
     }
 
+    // Build 45: watchOS Bluetooth-alert wake entry point. The existing Direct-G7 manager stays
+    // inside xDrip; this only gives SwiftUI's background-task handler a direct way to re-register
+    // the already-known CoreBluetooth operation without waiting for foreground UI activity.
+    @MainActor
+    func handleDirectG7BluetoothAlert() {
+        directG7Manager?.handleBluetoothAlertWake()
+    }
+
     // MARK: - Functions to provide context data to populate the views
 
     /// the latest BG reading value in the array as a double
@@ -1997,6 +2005,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var authTimeoutTask: DispatchWorkItem?
     private var reconnectTask: DispatchWorkItem?
     private var lastDeviceName = ""
+    private let knownPeripheralIDKey = "xdrip.g7Direct.knownPeripheralID.build45"
 
     // Build 41: persistent BLE lifecycle trace. This deliberately lives inside the existing
     // direct-G7 manager so no Watch UI or complication code needs to change.
@@ -2061,6 +2070,13 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         trace41("SCAN begin")
         publish("suche G7…")
 
+        if let storedID = UserDefaults.standard.string(forKey: knownPeripheralIDKey),
+           let uuid = UUID(uuidString: storedID),
+           let known = central.retrievePeripherals(withIdentifiers: [uuid]).first {
+            inspect(known)
+            return
+        }
+
         let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
         if let peripheral = connected.first(where: { ($0.name ?? "").hasPrefix("DX") }) ?? connected.first {
             inspect(peripheral)
@@ -2083,19 +2099,43 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         authenticated = false
         pendingGlucosePacket = nil
         trace41("DISCOVER \(lastDeviceName) state=\(peripheral.state.rawValue)")
-        publish("G7 gefunden; verbinde…")
-        central.connect(peripheral, options: nil)
+        if peripheral.state == .connected {
+            publish("G7 verbunden; registriere Notify erneut…")
+            peripheral.discoverServices([serviceUUID])
+        } else {
+            publish("G7 gefunden; verbinde…")
+            central.connect(peripheral, options: nil)
+        }
     }
 
     private func scheduleReconnect() {
-        trace41("RECONNECT scheduled")
+        trace41("RECONNECT immediate")
         reconnectTask?.cancel()
-        let task = DispatchWorkItem { [weak self] in
-            guard let self, self.enabled, self.targetPeripheral == nil else { return }
-            self.beginDiscovery()
+        reconnectTask = nil
+        guard enabled, central.state == .poweredOn, targetPeripheral == nil else { return }
+        beginDiscovery()
+    }
+
+    // Invoked by SwiftUI .backgroundTask(.bluetoothAlert). The handler does not decode or
+    // fabricate glucose. It only makes sure the existing xDrip CoreBluetooth connection / GATT
+    // subscription is registered so the normal didUpdateValueFor(0x4E) callback can execute.
+    func handleBluetoothAlertWake() {
+        enabled = true
+        trace41("BLUETOOTH_ALERT wake central=\(central.state.rawValue)")
+
+        guard central.state == .poweredOn else { return }
+
+        if let peripheral = targetPeripheral {
+            peripheral.delegate = self
+            if peripheral.state == .connected {
+                peripheral.discoverServices([serviceUUID])
+            } else if peripheral.state == .disconnected {
+                central.connect(peripheral, options: nil)
+            }
+            return
         }
-        reconnectTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: task)
+
+        beginDiscovery()
     }
 
     private func armAuthenticationTimeout(for peripheral: CBPeripheral) {
@@ -2286,13 +2326,14 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
         let restoredState = restored.first?.state.rawValue ?? -1
         trace41("RESTORE count=\(restored.count) state=\(restoredState)")
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
-           let peripheral = peripherals.first {
-            enabled = true
+        enabled = true
+
+        if let peripheral = restored.first(where: { $0.state == .connected }) ?? restored.first {
             targetPeripheral = peripheral
             peripheral.delegate = self
             lastDeviceName = peripheral.name ?? "unbekannt"
             authenticated = false
+            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralIDKey)
             publish("G7-Verbindung wiederhergestellt")
 
             if peripheral.state == .connected {
@@ -2300,6 +2341,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             } else {
                 central.connect(peripheral, options: nil)
             }
+            return
+        }
+
+        if central.state == .poweredOn {
+            beginDiscovery()
         }
     }
 
@@ -2420,6 +2466,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let seq41 = value.count >= 8 ? littleEndianUInt16(value, offset: 6) : 0
         let bg41 = value.count >= 14 ? Int(littleEndianUInt16(value, offset: 12) & 0x0FFF) : -1
         trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralIDKey)
 
         guard let reading = parseG7Glucose(value) else {
             publish("0x4E empfangen; Parser abgelehnt")
