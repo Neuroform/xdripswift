@@ -1,0 +1,172 @@
+name: Personal xDrip G7 Watch Build 43
+run-name: G7 Watch Build 43 Direct Sensor Widget Bridge (${{ github.ref_name }})
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/personal_watch_g7_build43_direct_widget_bridge.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 43
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout permanent Build 42 functional baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build42-functional-baseline
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Checkout current Build 43 patch only
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          token: ${{ secrets.GH_PAT }}
+          path: _build43_patch
+
+      - name: Verify Build 42 baseline prerequisites
+        run: |
+          set -euo pipefail
+          grep -Fq 'directG7Manager = G7DirectBLEManager(' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -Fq 'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"' 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          grep -Fq '<string>bluetooth-central</string>' 'xDrip-Watch-App-Info.plist'
+          grep -Fq 'xDripGraphV33' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'xDripBGV36' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          grep -Fq 'xDripDeltaV36' 'xDrip Watch Complication/XDripWatchComplication.swift'
+          echo 'Build 42 baseline prerequisites verified.'
+
+      - name: Freeze completed widget implementation
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build43-frozen.sha
+          done
+
+      - name: Apply direct G7 sensor to widget bridge
+        run: |
+          set -euo pipefail
+          python3 _build43_patch/.github/scripts/apply_g7_watch_build43_direct_widget_bridge.py
+
+      - name: Verify Build 43 direct bridge contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build43-frozen.sha
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          required = [
+              'publishReadingDirectlyToWidgets(_ reading: DirectG7Reading)',
+              'publishReadingDirectlyToWidgets(reading)',
+              'complicationSharedUserDefaults.',
+              'xDripGraphV33',
+              'xDripBGV36',
+              'xDripDeltaV36',
+              'WIDGET_WRITE seq=',
+              'xdrip.g7Direct.widgetBridge43.lastWriteAt',
+              'directG7Manager = G7DirectBLEManager(',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"'
+          ]
+          for token in required:
+              assert token in state, f'missing Build 43 requirement: {token}'
+
+          # Direct widget publication must occur before the existing authenticated-state gate.
+          receive = state.split('guard characteristic.uuid == controlUUID, value[0] == 0x4E else { return }', 1)[1]
+          assert receive.index('publishReadingDirectlyToWidgets(reading)') < receive.index('guard authenticated else')
+
+          # Project rule: Build 43 is additive on Build 42. Only WatchStateModel may change.
+          print('Build 43 contract verified: direct G7 packet -> App Group -> existing widget reload, before WatchStateModel/auth wait path.')
+          PY
+
+          changed="$(git diff --name-only | grep -v '^_build43_patch/' || true)"
+          test "$changed" = 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app and extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build43-ipa
+          mkdir -p /tmp/xdrip-build43-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build43-ipa
+          WATCH_APP="$(find /tmp/xdrip-build43-ipa/Payload -path '*/Watch/*.app' -type d -print -quit)"
+          test -n "$WATCH_APP"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$EXT"
+          codesign --verify --deep --strict "$WATCH_APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          echo 'Build 43 packaged Watch app and complication extension verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 43 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build43-direct-widget-bridge
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git commit -m 'Build 43: direct G7 sensor to widget bridge'
+          git push origin HEAD:refs/heads/watch-build43-direct-widget-bridge --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build43-direct-widget-bridge-artifacts
+          path: |
+            artifacts
+            buildlog
