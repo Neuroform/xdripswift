@@ -1998,6 +1998,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var reconnectTask: DispatchWorkItem?
     private var lastDeviceName = ""
 
+    // Persist the sensor CoreBluetooth identifier after a valid G7 packet. This lets a later
+    // CoreBluetooth wake/restoration reconnect directly to the same peripheral without waiting
+    // for an app-owned discovery timer.
+    private let knownPeripheralIDKey = "xdrip.g7Direct.knownPeripheralID.build44"
+
     // Build 41: persistent BLE lifecycle trace. This deliberately lives inside the existing
     // direct-G7 manager so no Watch UI or complication code needs to change.
     private let lifecycleTraceKey41 = "xdrip.g7Direct.lifecycleTrace41"
@@ -2061,6 +2066,15 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         trace41("SCAN begin")
         publish("suche G7…")
 
+        // Prefer the exact sensor that already delivered a valid direct G7 packet. Register the
+        // CoreBluetooth connect immediately; do not depend on the Watch UI being foreground.
+        if let storedID = UserDefaults.standard.string(forKey: knownPeripheralIDKey),
+           let uuid = UUID(uuidString: storedID),
+           let known = central.retrievePeripherals(withIdentifiers: [uuid]).first {
+            inspect(known)
+            return
+        }
+
         let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
         if let peripheral = connected.first(where: { ($0.name ?? "").hasPrefix("DX") }) ?? connected.first {
             inspect(peripheral)
@@ -2083,19 +2097,26 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         authenticated = false
         pendingGlucosePacket = nil
         trace41("DISCOVER \(lastDeviceName) state=\(peripheral.state.rawValue)")
-        publish("G7 gefunden; verbinde…")
-        central.connect(peripheral, options: nil)
+        if peripheral.state == .connected {
+            publish("G7 bereits verbunden; aktiviere Subscription…")
+            peripheral.discoverServices([serviceUUID])
+        } else {
+            publish("G7 gefunden; verbinde…")
+            // The connection itself is the durable CoreBluetooth operation. Once registered,
+            // watchOS can restore/wake this app for subsequent BLE events after initialization.
+            central.connect(peripheral, options: nil)
+        }
     }
 
     private func scheduleReconnect() {
-        trace41("RECONNECT scheduled")
+        trace41("RECONNECT immediate")
         reconnectTask?.cancel()
-        let task = DispatchWorkItem { [weak self] in
-            guard let self, self.enabled, self.targetPeripheral == nil else { return }
-            self.beginDiscovery()
-        }
-        reconnectTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: task)
+        reconnectTask = nil
+        guard enabled, central.state == .poweredOn, targetPeripheral == nil else { return }
+
+        // Do not rely on a delayed DispatchQueue timer: watchOS may suspend the app before it
+        // fires. Register the next CoreBluetooth operation immediately so the system owns it.
+        beginDiscovery()
     }
 
     private func armAuthenticationTimeout(for peripheral: CBPeripheral) {
@@ -2286,9 +2307,12 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
         let restoredState = restored.first?.state.rawValue ?? -1
         trace41("RESTORE count=\(restored.count) state=\(restoredState)")
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
-           let peripheral = peripherals.first {
-            enabled = true
+
+        // A CoreBluetooth restoration is itself the background wake. Adopt the restored sensor
+        // immediately and re-establish the existing GATT notify subscription without involving
+        // RootView or any foreground UI action.
+        enabled = true
+        if let peripheral = restored.first(where: { $0.state == .connected }) ?? restored.first {
             targetPeripheral = peripheral
             peripheral.delegate = self
             lastDeviceName = peripheral.name ?? "unbekannt"
@@ -2300,6 +2324,12 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             } else {
                 central.connect(peripheral, options: nil)
             }
+            return
+        }
+
+        // Restoration can contain a pending scan without a peripheral. Register discovery now.
+        if central.state == .poweredOn {
+            beginDiscovery()
         }
     }
 
@@ -2420,6 +2450,10 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let seq41 = value.count >= 8 ? littleEndianUInt16(value, offset: 6) : 0
         let bg41 = value.count >= 14 ? Int(littleEndianUInt16(value, offset: 12) & 0x0FFF) : -1
         trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
+
+        // Once this peripheral proves itself by sending the expected G7 glucose packet, remember
+        // its CoreBluetooth identifier for all subsequent background reconnect/restoration cycles.
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralIDKey)
 
         guard let reading = parseG7Glucose(value) else {
             publish("0x4E empfangen; Parser abgelehnt")
