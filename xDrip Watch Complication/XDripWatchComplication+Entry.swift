@@ -32,6 +32,7 @@ extension XDripWatchComplication.Entry {
         var highLimitInMgDl: Double
         var urgentHighLimitInMgDl: Double
         var keepAliveIsDisabled: Bool
+        var dataSource: String?
         
         var bgUnitString: String
         var bgValueInMgDl: Double?
@@ -39,10 +40,10 @@ extension XDripWatchComplication.Entry {
         var hasRecentReading: Bool {
             guard let bgReadingDate else { return false }
 
-            return bgReadingDate > Date().addingTimeInterval(-60 * 20)
+            return bgReadingDate > Date().addingTimeInterval(-60 * 12)
         }
                 
-        init(bgReadingValues: [Double]? = nil, bgReadingDates: [Date]? = nil, isMgDl: Bool? = true, slopeOrdinal: Int? = 0, deltaValueInUserUnit: Double? = nil, urgentLowLimitInMgDl: Double? = 60, lowLimitInMgDl: Double? = 80, highLimitInMgDl: Double? = 180, urgentHighLimitInMgDl: Double? = 250, keepAliveIsDisabled: Bool? = false) {
+        init(bgReadingValues: [Double]? = nil, bgReadingDates: [Date]? = nil, isMgDl: Bool? = true, slopeOrdinal: Int? = 0, deltaValueInUserUnit: Double? = nil, urgentLowLimitInMgDl: Double? = 60, lowLimitInMgDl: Double? = 80, highLimitInMgDl: Double? = 180, urgentHighLimitInMgDl: Double? = 250, keepAliveIsDisabled: Bool? = false, dataSource: String? = nil) {
             self.bgReadingValues = bgReadingValues
             self.bgReadingDates = bgReadingDates
             self.isMgDl = isMgDl ?? true
@@ -53,6 +54,7 @@ extension XDripWatchComplication.Entry {
             self.highLimitInMgDl = highLimitInMgDl ?? 180
             self.urgentHighLimitInMgDl = urgentHighLimitInMgDl ?? 250
             self.keepAliveIsDisabled = keepAliveIsDisabled ?? false
+            self.dataSource = dataSource
             
             self.bgValueInMgDl = (bgReadingValues?.count ?? 0) > 0 ? bgReadingValues?[0] : nil
             self.bgReadingDate = (bgReadingDates?.count ?? 0) > 0 ? bgReadingDates?[0] : nil

@@ -1,29 +1,62 @@
 //
-//  xDripWatchComplication.swift
+//  XDripWatchComplication.swift
 //  xDrip Watch Complication
 //
-//  Created by Paul Plant on 23/2/24.
-//  Copyright © 2024 Johan Degraeve. All rights reserved.
+//  Build 36: final graph + two circular complications.
 //
 
 import WidgetKit
 import SwiftUI
 
-@main
+// Keep this type as the namespace used by Entry/Provider/EntryView extensions.
 struct XDripWatchComplication: Widget {
-    let kind: String = "xDripWatchComplication"
+    let kind: String = "xDripGraphV33"
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: Provider()) { entry in
             XDripWatchComplication.EntryView(entry: entry)
         }
-        .configurationDisplayName(ConstantsHomeView.applicationName)
-        .description("Show the current blood glucose level")
+        .configurationDisplayName("xDrip Graph")
+        .description("xDrip 150-minute glucose graph")
+        .supportedFamilies([.accessoryRectangular])
+        .contentMarginsDisabled()
     }
 }
 
-#Preview(as: .accessoryRectangular) {
-    XDripWatchComplication()
-} timeline: {
-    XDripWatchComplication.Entry.placeholder
+struct XDripBGComplicationV36: Widget {
+    let kind: String = "xDripBGV36"
+
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: XDripWatchComplication.Provider()) { entry in
+            XDripBGCircleV36View(entry: entry)
+        }
+        .configurationDisplayName("xDrip BG")
+        .description("Current glucose and trend")
+        .supportedFamilies([.accessoryCircular])
+        .contentMarginsDisabled()
+    }
+}
+
+struct XDripDeltaComplicationV36: Widget {
+    let kind: String = "xDripDeltaV36"
+
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: XDripWatchComplication.Provider()) { entry in
+            XDripDeltaCircleV36View(entry: entry)
+        }
+        .configurationDisplayName("xDrip Delta")
+        .description("Glucose change since the previous reading")
+        .supportedFamilies([.accessoryCircular])
+        .contentMarginsDisabled()
+    }
+}
+
+@main
+struct XDripWatchComplicationBundleV36: WidgetBundle {
+    @WidgetBundleBuilder
+    var body: some Widget {
+        XDripWatchComplication()
+        XDripBGComplicationV36()
+        XDripDeltaComplicationV36()
+    }
 }

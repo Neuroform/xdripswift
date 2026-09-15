@@ -335,6 +335,16 @@ final class WatchManager: NSObject, ObservableObject, @unchecked Sendable {
         // if more than x minutes have passed since the last complication update, call transferCurrentComplicationUserInfo to force an update
         // if not, then just send it as a normal priority transferUserInfo (but limit the sending to once every 5 minutes!) which will be queued and sent as soon as the watch app is reachable again (this will help get the app showing data quicker)
         if let userInfo = payload(updateTypes: updateTypes) {
+            // Phase 1 personal build: keep the latest glucose/status state coalesced.
+            // updateApplicationContext replaces the previous state instead of building a queue.
+            if !updateTypes.contains(.agp) {
+                do {
+                    try session.updateApplicationContext(userInfo)
+                } catch {
+                    trace("error updating latest watch state, error = %{public}@", log: log, category: ConstantsLog.categoryWatchManager, type: .error, error.localizedDescription)
+                }
+            }
+
             if session.isReachable {
                 trace("sending foreground watch update", log: log, category: ConstantsLog.categoryWatchManager, type: .debug)
                 session.sendMessage(userInfo, replyHandler: nil, errorHandler: { [weak self] error in
@@ -351,6 +361,14 @@ final class WatchManager: NSObject, ObservableObject, @unchecked Sendable {
                     lastForcedComplicationUpdateTimeStamp = .now
                 } else {
                     trace("sending background watch update", log: log, category: ConstantsLog.categoryWatchManager, type: .debug)
+
+                    // BG payloads represent current state, not an event log. Cancel older queued
+                    // BG states so watchOS cannot replay a backlog after a newer reading is available.
+                    if userInfo["bgReadings"] != nil {
+                        for transfer in session.outstandingUserInfoTransfers where transfer.userInfo["bgReadings"] != nil {
+                            transfer.cancel()
+                        }
+                    }
 
                     session.transferUserInfo(userInfo)
                 }

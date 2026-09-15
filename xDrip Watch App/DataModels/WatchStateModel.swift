@@ -7,6 +7,7 @@
 //
 
 import Combine
+import CoreBluetooth
 import Foundation
 import os
 import SwiftUI
@@ -93,6 +94,33 @@ final class WatchStateModel: NSObject, ObservableObject {
     // make sure late AGP replies from older requests don't replace newer chart data
     private var latestAGPRequestID: Double = 0
 
+    // Prevent queued/background WatchConnectivity payloads from replacing a newer glucose state.
+    private var latestBgPayloadGeneratedAt: Double = 0
+
+    // Personal direct-G7 Watch path. The BLE manager subscribes only to existing notifications;
+    // it does not start/stop/calibrate the sensor or send Dexcom protocol commands.
+    private var directG7Manager: G7DirectBLEManager?
+    private var lastDirectG7ReadingDate: Date?
+
+    @Published var bgDataSource: String = "iPhone"
+    @Published var directG7Status: String = "initialisiert"
+    @Published var directG7DeviceName: String = ""
+    @Published var directG7Authenticated: Bool = false
+    @Published var directG7LastValue: Double?
+    @Published var directG7LastDate: Date?
+    @Published var directG7LastTrend: Double?
+    @Published var directG7LastSequence: UInt16?
+    @Published var directG7ReadingCount: Int = 0
+
+    // Manual G7 authentication probe. This is intentionally opt-in and foreground-only.
+    private var g7AuthProbeManager: G7AuthProbeManager?
+    @Published var g7AuthProbeStatus: String = "bereit"
+    @Published var g7AuthProbeDeviceName: String = ""
+    @Published var g7AuthProbeResponseHex: String = ""
+    @Published var g7AuthProbeRunning: Bool = false
+    @Published var g7AuthProbeChallengeReceived: Bool = false
+    @Published var g7AuthProbeTelemetry: String = ""
+
     // keep the latest AGP request if WatchConnectivity is not ready yet
     // this fixes first-load cases where the AGP page appears before the session is reachable
     private var pendingAGPRequestRange: (startDate: Date, endDate: Date)?
@@ -139,6 +167,25 @@ final class WatchStateModel: NSObject, ObservableObject {
 
         session.delegate = self
         session.activate()
+
+        // Build 42: restore the already-proven automatic Direct-G7 path.
+        // WatchConnectivity remains a fallback; Direct-G7 wins when the same sample arrives.
+        directG7Manager = G7DirectBLEManager(
+            onState: { [weak self] status, deviceName, authenticated in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.directG7Status = status
+                    self.directG7DeviceName = deviceName
+                    self.directG7Authenticated = authenticated
+                }
+            },
+            onReading: { [weak self] reading in
+                DispatchQueue.main.async {
+                    self?.processDirectG7Reading(reading)
+                }
+            }
+        )
+        directG7Manager?.start()
     }
 
     // MARK: - Functions to provide context data to populate the views
@@ -152,7 +199,7 @@ final class WatchStateModel: NSObject, ObservableObject {
     /// returns blood glucose value as a string in the user-defined measurement unit. Will check and display also high, low and error texts as required.
     /// - Returns: a String with the formatted value/unit or error text
     func bgValueStringInUserChosenUnit() -> String {
-        if let bgReadingDate = bgReadingDate(), let bgValueInMgDl = bgValueInMgDl(), bgReadingDate > Date().addingTimeInterval(-60 * 20) {
+        if let bgReadingDate = bgReadingDate(), let bgValueInMgDl = bgValueInMgDl(), bgReadingDate > Date().addingTimeInterval(-60 * 7) {
             var returnValue: String
 
             if bgValueInMgDl >= 400 {
@@ -251,7 +298,7 @@ final class WatchStateModel: NSObject, ObservableObject {
     ///  returns a string holding the trend arrow
     /// - Returns: trend arrow string (i.e.  "↑")
     func trendArrow() -> String {
-        if let bgReadingDate = bgReadingDate(), bgReadingDate > Date().addingTimeInterval(-60 * 20) {
+        if let bgReadingDate = bgReadingDate(), bgReadingDate > Date().addingTimeInterval(-60 * 7) {
             switch slopeOrdinal {
             case 7:
                 return "\u{2193}\u{2193}" // ↓↓
@@ -278,7 +325,7 @@ final class WatchStateModel: NSObject, ObservableObject {
     /// convert the optional delta change int (in mg/dL) to a formatted change value in the user chosen unit making sure all zero values are shown as a positive change to follow Nightscout convention
     /// - Returns: a string holding the formatted delta change value (i.e. +0.4 or -6)
     func deltaChangeStringInUserChosenUnit() -> String {
-        if let bgReadingDate = bgReadingDate(), bgReadingDate > Date().addingTimeInterval(-60 * 20) {
+        if let bgReadingDate = bgReadingDate(), bgReadingDate > Date().addingTimeInterval(-60 * 7) {
             let deltaValueAsString = isMgDl ? deltaValueInUserUnit.mgDlToMmolAndToString(mgDl: isMgDl) : deltaValueInUserUnit.mmolToString()
 
             var deltaSign = ""
@@ -641,37 +688,58 @@ final class WatchStateModel: NSObject, ObservableObject {
     }
 
     private func processBgReadingsFromDictionary(dictionary: [String: Any]) -> Bool {
-        let bgReadingDatesFromDictionary: [Double] = dictionary["bgReadingDatesAsDouble"] as? [Double] ?? [0]
+        let bgReadingDatesFromDictionary: [Double] = dictionary["bgReadingDatesAsDouble"] as? [Double] ?? []
 
-        // let's make a quick check to see if the data about to be processed is from within the last hour
-        // this is to avoid long delays when re-opening a Watch app for the first time in days and waiting
-        // whilst the whole queue of userInfo messages are processed
-        if let lastBgReadingDateFromDictionaryReceived = bgReadingDatesFromDictionary.first, Date(timeIntervalSince1970: lastBgReadingDateFromDictionaryReceived) > Date(timeIntervalSinceNow: -60 * 60 * 1) {
-            bgReadingDates = bgReadingDatesFromDictionary.map { bgReadingDateAsDouble -> Date in
-                return Date(timeIntervalSince1970: bgReadingDateAsDouble)
-            }
-
-            bgReadingValues = dictionary["bgReadingValues"] as? [Double] ?? [100]
-
-            slopeOrdinal = dictionary["slopeOrdinal"] as? Int ?? 0
-            deltaValueInUserUnit = dictionary["deltaValueInUserUnit"] as? Double ?? 0
-            updatedDate = Date(timeIntervalSince1970: dictionary["generatedAt"] as? Double ?? Date().timeIntervalSince1970)
-
-            // check if there is any BG data available before updating the data source info strings accordingly
-            if let bgReadingDate = bgReadingDate() {
-                lastUpdatedTextString = Texts_WatchApp.lastReading + " "
-                lastUpdatedTimeString = bgReadingDate.formatted(date: .omitted, time: .shortened)
-                lastUpdatedTimeAgoString = bgReadingDate.daysAndHoursAgo(appendAgo: true)
-            } else {
-                lastUpdatedTextString = Texts_WatchApp.noSensorData
-                lastUpdatedTimeString = ""
-                lastUpdatedTimeAgoString = ""
-            }
-
-            return true
+        guard let incomingLatestTimestamp = bgReadingDatesFromDictionary.first else {
+            return false
         }
 
-        return false
+        let incomingLatestDate = Date(timeIntervalSince1970: incomingLatestTimestamp)
+        let incomingGeneratedAt = dictionary["generatedAt"] as? Double ?? incomingLatestTimestamp
+
+        // If the Watch has already received this same G7 sample directly, keep the direct state.
+        // A genuinely newer iPhone sample still wins automatically, which preserves fallback.
+        if let lastDirectG7ReadingDate,
+           abs(lastDirectG7ReadingDate.timeIntervalSince(incomingLatestDate)) < 90 {
+            return false
+        }
+
+        // Ignore very old queued states and, critically, never allow an older BG state to replace
+        // a newer value that has already reached the Watch through another delivery channel.
+        guard incomingLatestDate > Date(timeIntervalSinceNow: -60 * 60) else {
+            return false
+        }
+
+        if let currentLatestDate = bgReadingDates.first {
+            if incomingLatestDate < currentLatestDate {
+                return false
+            }
+
+            if incomingLatestDate == currentLatestDate,
+               incomingGeneratedAt <= latestBgPayloadGeneratedAt {
+                return false
+            }
+        }
+
+        latestBgPayloadGeneratedAt = incomingGeneratedAt
+        bgReadingDates = bgReadingDatesFromDictionary.map { Date(timeIntervalSince1970: $0) }
+        bgReadingValues = dictionary["bgReadingValues"] as? [Double] ?? []
+        slopeOrdinal = dictionary["slopeOrdinal"] as? Int ?? 0
+        deltaValueInUserUnit = dictionary["deltaValueInUserUnit"] as? Double ?? 0
+        updatedDate = Date(timeIntervalSince1970: incomingGeneratedAt)
+        bgDataSource = "iPhone"
+
+        if let bgReadingDate = bgReadingDate() {
+            lastUpdatedTextString = Texts_WatchApp.lastReading + " "
+            lastUpdatedTimeString = bgReadingDate.formatted(date: .omitted, time: .shortened)
+            lastUpdatedTimeAgoString = bgReadingDate.daysAndHoursAgo(appendAgo: true)
+        } else {
+            lastUpdatedTextString = Texts_WatchApp.noSensorData
+            lastUpdatedTimeString = ""
+            lastUpdatedTimeAgoString = ""
+        }
+
+        return true
     }
 
     private func processStatusFromDictionary(dictionary: [String: Any]) -> Bool {
@@ -782,6 +850,129 @@ final class WatchStateModel: NSObject, ObservableObject {
         )
     }
 
+
+
+    // MARK: - Manual G7 authentication probe
+
+    func startG7AuthProbe() {
+        guard !g7AuthProbeRunning else { return }
+
+        g7AuthProbeStatus = "initialisiere Auth-Probe…"
+        g7AuthProbeDeviceName = ""
+        g7AuthProbeResponseHex = ""
+        g7AuthProbeChallengeReceived = false
+        g7AuthProbeTelemetry = ""
+        g7AuthProbeRunning = true
+
+        let manager = G7AuthProbeManager { [weak self] status, deviceName, responseHex, challengeReceived, telemetry, finished in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.g7AuthProbeStatus = status
+                self.g7AuthProbeDeviceName = deviceName
+                self.g7AuthProbeResponseHex = responseHex
+                self.g7AuthProbeChallengeReceived = challengeReceived
+                self.g7AuthProbeTelemetry = telemetry
+                if finished {
+                    self.g7AuthProbeRunning = false
+                    self.g7AuthProbeManager = nil
+                }
+            }
+        }
+
+        g7AuthProbeManager = manager
+        manager.start()
+    }
+
+    func stopG7AuthProbe() {
+        g7AuthProbeManager?.stop(userInitiated: true)
+    }
+
+    // MARK: - Direct Dexcom G7 Watch BLE path
+
+    private func processDirectG7Reading(_ reading: DirectG7Reading) {
+        // Never let an old/expired peripheral replace a clearly newer state already on the Watch.
+        if let currentLatestDate = bgReadingDates.first,
+           currentLatestDate > reading.date.addingTimeInterval(90) {
+            return
+        }
+
+        // Merge into the existing 12-hour history. Remove the same sample if it already arrived
+        // from the iPhone (timestamps can differ by a few seconds between the two paths).
+        var merged = Array(zip(bgReadingDates, bgReadingValues))
+        merged.removeAll { abs($0.0.timeIntervalSince(reading.date)) < 90 }
+        merged.append((reading.date, reading.glucoseMgDl))
+        merged = merged
+            .filter { $0.0 > Date().addingTimeInterval(-12 * 60 * 60) }
+            .sorted { $0.0 > $1.0 }
+
+        bgReadingDates = merged.map { $0.0 }
+        bgReadingValues = merged.map { $0.1 }
+        bgReadingDatesAsDouble = bgReadingDates.map { $0.timeIntervalSince1970 }
+
+        slopeOrdinal = directSlopeOrdinal(for: reading.trendMgDlPerMinute)
+
+        // Delta is meaningful only when the previous sample is from roughly one G7 interval ago.
+        if merged.count > 1 {
+            let previousDate = merged[1].0
+            let previousMgDl = merged[1].1
+            let interval = reading.date.timeIntervalSince(previousDate)
+
+            if interval > 0, interval <= 7.5 * 60 {
+                if isMgDl {
+                    deltaValueInUserUnit = reading.glucoseMgDl - previousMgDl
+                } else {
+                    let currentMmol = ((reading.glucoseMgDl / 18.0182) * 10).rounded() / 10
+                    let previousMmol = ((previousMgDl / 18.0182) * 10).rounded() / 10
+                    deltaValueInUserUnit = currentMmol - previousMmol
+                }
+            } else {
+                deltaValueInUserUnit = 0
+            }
+        } else {
+            deltaValueInUserUnit = 0
+        }
+
+        let now = Date()
+        latestBgPayloadGeneratedAt = max(latestBgPayloadGeneratedAt, now.timeIntervalSince1970)
+        lastDirectG7ReadingDate = reading.date
+        updatedDate = now
+        bgDataSource = "G7 BLE"
+
+        directG7LastValue = reading.glucoseMgDl
+        directG7LastDate = reading.date
+        directG7LastTrend = reading.trendMgDlPerMinute
+        directG7LastSequence = reading.sequence
+        directG7ReadingCount += 1
+
+        lastUpdatedTextString = Texts_WatchApp.lastReading + " "
+        lastUpdatedTimeString = reading.date.formatted(date: .omitted, time: .shortened)
+        lastUpdatedTimeAgoString = reading.date.daysAndHoursAgo(appendAgo: true)
+
+        // Persist immediately for the WidgetKit complication and ask only the xDrip complication
+        // timeline to reload. WidgetKit still controls the exact render timing.
+        updateComplicationData()
+    }
+
+    private func directSlopeOrdinal(for trend: Double?) -> Int {
+        guard let trend else { return 0 }
+
+        if trend >= 3 {
+            return 1       // ↑↑
+        } else if trend >= 2 {
+            return 2       // ↑
+        } else if trend >= 1 {
+            return 3       // ↗
+        } else if trend > -1 {
+            return 4       // →
+        } else if trend > -2 {
+            return 5       // ↘
+        } else if trend > -3 {
+            return 6       // ↓
+        } else {
+            return 7       // ↓↓
+        }
+    }
+
     /// once we've process the state update, then save this data to the shared app group so that the complication can read it
     private func updateComplicationData() {
         guard let sharedUserDefaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else { return }
@@ -801,14 +992,1344 @@ final class WatchStateModel: NSObject, ObservableObject {
 
         // store the model in the shared user defaults using a name that is uniquely specific to this copy of the app as installed on
         // the user's device - this allows several copies of the app to be installed without cross-contamination of widget/complication data
-        if let stateData = try? JSONEncoder().encode(complicationSharedUserDefaultsModel) {
-            sharedUserDefaults.set(stateData, forKey: "complicationSharedUserDefaults.\(Bundle.main.mainAppBundleIdentifier)")
+        let stateKey = "complicationSharedUserDefaults.\(Bundle.main.mainAppBundleIdentifier)"
+        let sourceKey = "complicationDataSource.\(Bundle.main.mainAppBundleIdentifier)"
+        var stateChanged = false
+
+        if let stateData = try? JSONEncoder().encode(complicationSharedUserDefaultsModel),
+           sharedUserDefaults.data(forKey: stateKey) != stateData {
+            sharedUserDefaults.set(stateData, forKey: stateKey)
+            stateChanged = true
         }
 
-        // now that the new data is stored in the app group, try to force the complications to reload
-        WidgetCenter.shared.reloadAllTimelines()
+        // Keep the source key backward-compatible, but don't spend a WidgetKit reload budget
+        // when neither the BG payload nor its source actually changed.
+        let sourceChanged = sharedUserDefaults.string(forKey: sourceKey) != bgDataSource
+        if sourceChanged {
+            sharedUserDefaults.set(bgDataSource, forKey: sourceKey)
+        }
 
-        lastComplicationUpdateTimeStamp = .now
+        if stateChanged || sourceChanged {
+            // Every genuinely new BG state is already persisted at this point. Reload ONLY the
+            // xDrip complication; the Provider then replaces its rolling/stale future timeline.
+            for complicationKind in [
+                "xDripGraphV33",
+                "xDripBGV36",
+                "xDripDeltaV36"
+            ] {
+                WidgetCenter.shared.reloadTimelines(ofKind: complicationKind)
+            }
+            lastComplicationUpdateTimeStamp = .now
+        }
+    }
+}
+
+
+
+// MARK: - Manual G7 authentication probe
+
+private final class G7AuthProbeManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    typealias UpdateHandler = (_ status: String, _ deviceName: String, _ responseHex: String, _ challengeReceived: Bool, _ telemetry: String, _ finished: Bool) -> Void
+
+    private let advertisementUUID = CBUUID(string: "FEBC")
+    private let serviceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
+    private let expectedChannelUUIDs = [
+        CBUUID(string: "F8083534-849E-531C-C594-30F1F86A4EA5"),
+        CBUUID(string: "F8083535-849E-531C-C594-30F1F86A4EA5"),
+        CBUUID(string: "F8083536-849E-531C-C594-30F1F86A4EA5"),
+        CBUUID(string: "F8083538-849E-531C-C594-30F1F86A4EA5")
+    ]
+
+    private let testWindowSeconds: TimeInterval = 2700
+    private let retryDelaySeconds: TimeInterval = 3
+    private let minStableConnectionSeconds: TimeInterval = 0.25
+    private let connectTimeoutSeconds: TimeInterval = 15
+    private let gattTimeoutSeconds: TimeInterval = 8
+    private let notifySetupTimeoutSeconds: TimeInterval = 5
+    private let passiveListenSeconds: TimeInterval = 20
+    private let captureAfterFirstRXSeconds: TimeInterval = 4
+    private let targetConsecutiveBGReadings = 6
+
+    private let onUpdate: UpdateHandler
+    private var central: CBCentralManager!
+    private var targetPeripheral: CBPeripheral?
+    private var protectedPeripheralIDs = Set<UUID>()
+    private var expectedCharacteristics: [CBUUID: CBCharacteristic] = [:]
+
+    private var running = false
+    private var localDisconnectRequested = false
+    private var finishAfterLocalDisconnect = false
+    private var retryAfterLocalDisconnect = false
+    private var pendingFinalStatus = ""
+
+    private var lastDeviceName = ""
+    private var latestRXHex = ""
+    private var eventLog: [String] = []
+    private var connectedAt: Date?
+    private var overallDeadline: Date?
+    private var attemptCount = 0
+
+    private var pendingNotifyUUIDs = Set<CBUUID>()
+    private var enabledNotifyUUIDs = Set<CBUUID>()
+    private var failedNotifyUUIDs = Set<CBUUID>()
+    private var rxCounts: [CBUUID: Int] = [:]
+    private var firstRXAt: Date?
+    private var latestPassiveBGSummary = ""
+
+    // Build 15 validation state is intentionally kept across retry/disconnect attempts.
+    // Per-attempt BLE state is still reset normally.
+    private var capturedBGReadings: [String] = []
+    private var capturedBGSequences = Set<UInt16>()
+    private var lastCapturedBGSequence: UInt16?
+    private var consecutiveBGRun = 0
+    private var longestConsecutiveBGRun = 0
+    private var duplicateBGPackets = 0
+
+    private var overallTimeoutTask: DispatchWorkItem?
+    private var statusTickTask: DispatchWorkItem?
+    private var retryTask: DispatchWorkItem?
+    private var connectTimeoutTask: DispatchWorkItem?
+    private var qualificationTask: DispatchWorkItem?
+    private var gattTimeoutTask: DispatchWorkItem?
+    private var notifySetupTimeoutTask: DispatchWorkItem?
+    private var passiveListenTask: DispatchWorkItem?
+    private var rxFinishTask: DispatchWorkItem?
+
+    init(onUpdate: @escaping UpdateHandler) {
+        self.onUpdate = onUpdate
+        super.init()
+        // No restore identifier: this manual diagnostic must not be resurrected by watchOS.
+        central = CBCentralManager(delegate: self, queue: .main, options: nil)
+    }
+
+    private var rxTotal: Int {
+        rxCounts.values.reduce(0, +)
+    }
+
+    func start() {
+        guard !running else { return }
+        running = true
+        targetPeripheral = nil
+        protectedPeripheralIDs.removeAll()
+        localDisconnectRequested = false
+        finishAfterLocalDisconnect = false
+        retryAfterLocalDisconnect = false
+        pendingFinalStatus = ""
+        lastDeviceName = ""
+        latestRXHex = ""
+        eventLog.removeAll()
+        connectedAt = nil
+        overallDeadline = nil
+        attemptCount = 0
+        capturedBGReadings.removeAll()
+        capturedBGSequences.removeAll()
+        lastCapturedBGSequence = nil
+        consecutiveBGRun = 0
+        longestConsecutiveBGRun = 0
+        duplicateBGPackets = 0
+        resetPerAttemptData()
+
+        addEvent("Build15 gestartet · Multi-Cycle 0x4E-Validierung")
+        addEvent("45 min max · Ziel 6 fortlaufende BG-Sequenzen")
+        addEvent("FEBC/GATT-Match · Name ignoriert · nur CCCD Notify")
+        addEvent("Dexcom-App-TX = 0 · KEIN Schreiben in xDrip/Komplikation")
+        publish("warte auf Bluetooth…")
+
+        if central.state == .poweredOn {
+            beginObservationWindow()
+        }
+    }
+
+    func stop(userInitiated: Bool) {
+        guard running else { return }
+        addEvent(userInitiated ? "Benutzerabbruch" : "Notify-Test stop")
+        if let peripheral = targetPeripheral,
+           peripheral.state == .connected || peripheral.state == .connecting {
+            requestLocalDisconnect(
+                finalStatus: userInitiated ? "Notify-Test abgebrochen" : "Notify-Test beendet",
+                finish: true
+            )
+        } else {
+            finishWithoutConnection(userInitiated ? "Notify-Test abgebrochen" : "Notify-Test beendet")
+        }
+    }
+
+    private func timestamp(_ date: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter.string(from: date)
+    }
+
+    private func elapsedMS(from start: Date?, to end: Date = Date()) -> String {
+        guard let start else { return "n/a" }
+        return String(format: "%.0f ms", end.timeIntervalSince(start) * 1000.0)
+    }
+
+    private func shortUUID(_ uuid: CBUUID) -> String {
+        let value = uuid.uuidString.uppercased()
+        if value.hasPrefix("F808") && value.count >= 8 {
+            return String(value.prefix(8))
+        }
+        return value
+    }
+
+    private func propertyText(_ characteristic: CBCharacteristic) -> String {
+        var values: [String] = []
+        let properties = characteristic.properties
+        if properties.contains(.read) { values.append("R") }
+        if properties.contains(.write) { values.append("W") }
+        if properties.contains(.writeWithoutResponse) { values.append("WNR") }
+        if properties.contains(.notify) { values.append("N") }
+        if properties.contains(.indicate) { values.append("I") }
+        if properties.contains(.broadcast) { values.append("B") }
+        return values.isEmpty ? "-" : values.joined(separator: "|")
+    }
+
+    private func hex(_ data: Data) -> String {
+        data.map { String(format: "%02X", $0) }.joined()
+    }
+
+    private func littleEndianUInt16(_ data: Data, offset: Int) -> UInt16 {
+        UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+
+    private func littleEndianUInt32(_ data: Data, offset: Int) -> UInt32 {
+        UInt32(data[offset])
+            | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16)
+            | (UInt32(data[offset + 3]) << 24)
+    }
+
+    /// Decode only packets that the sensor has already notified to us. This mirrors the
+    /// established G7 real-time packet field layout used by xDrip/Loop-style G7 parsers:
+    /// opcode 0x4E, message timestamp @2, sequence @6, age @10, glucose @12,
+    /// algorithm state @14, trend @15. No application-level BLE write is performed here.
+    private func passivePacketSummary(_ data: Data, characteristic: CBCharacteristic) -> String? {
+        let channel = shortUUID(characteristic.uuid)
+
+        if channel == "F8083534", data.count >= 19, data[0] == 0x4E, data[1] == 0x00 {
+            let messageTimestamp = littleEndianUInt32(data, offset: 2)
+            let sequence = littleEndianUInt16(data, offset: 6)
+            let ageSeconds = Int(data[10])
+            let glucoseWord = littleEndianUInt16(data, offset: 12)
+            let glucose = Int(glucoseWord & 0x0FFF)
+            let algorithmState = Int(data[14])
+            let trendRaw = Int(Int8(bitPattern: data[15]))
+            let trend = Double(trendRaw) / 10.0
+
+            addEvent(
+                String(
+                    format: "DECODE 0x4E ts=%u seq=%u age=%ds BG=%d state=%d trend=%+.1f",
+                    messageTimestamp,
+                    sequence,
+                    ageSeconds,
+                    glucose,
+                    algorithmState,
+                    trend
+                )
+            )
+
+            guard (20...600).contains(glucose) else {
+                return "0x4E erkannt · BG-Feld unplausibel: \(glucose) · nur Diagnose"
+            }
+
+            // The diagnostic page may display a decoded value, but an unexpectedly old packet
+            // is explicitly labelled as not current and is never written to xDrip state.
+            guard ageSeconds <= 7 * 60 else {
+                return "0x4E erkannt · \(glucose) mg/dL · Alter \(ageSeconds)s · NICHT AKTUELL"
+            }
+
+            return String(
+                format: "PASSIV-BG %d mg/dL · Alter %ds · Trend %+.1f/min · Seq %u · State %d",
+                glucose,
+                ageSeconds,
+                trend,
+                sequence,
+                algorithmState
+            )
+        }
+
+        if channel == "F8083535", data.count >= 1, data[0] == 0x03 {
+            return "PASSIV Auth-Challenge 0x03 · \(data.count) Byte · keine Antwort"
+        }
+
+        if channel == "F8083535", data.count >= 3, data[0] == 0x05 {
+            return String(format: "PASSIV Auth-Status 05 %02X %02X · keine TX", data[1], data[2])
+        }
+
+        if channel == "F8083534", let opcode = data.first {
+            return String(format: "PASSIV 3534 Opcode 0x%02X · %d Byte", opcode, data.count)
+        }
+
+        if channel == "F8083536" {
+            return "PASSIV 3536 Notify · \(data.count) Byte"
+        }
+
+        if channel == "F8083538" {
+            return "PASSIV 3538 Notify · \(data.count) Byte"
+        }
+
+        return nil
+    }
+
+    private func recordPassiveBGPacket(_ data: Data) {
+        guard data.count >= 19, data[0] == 0x4E, data[1] == 0x00 else { return }
+
+        let messageTimestamp = littleEndianUInt32(data, offset: 2)
+        let sequence = littleEndianUInt16(data, offset: 6)
+        let ageSeconds = Int(data[10])
+        let glucoseWord = littleEndianUInt16(data, offset: 12)
+        let glucose = Int(glucoseWord & 0x0FFF)
+        let algorithmState = Int(data[14])
+        let trendRaw = Int(Int8(bitPattern: data[15]))
+        let trend = Double(trendRaw) / 10.0
+
+        guard (20...600).contains(glucose), ageSeconds <= 7 * 60 else { return }
+
+        guard capturedBGSequences.insert(sequence).inserted else {
+            duplicateBGPackets += 1
+            addEvent("VALIDIERUNG DUP · Seq \(sequence) · BG \(glucose) · duplicates \(duplicateBGPackets)")
+            return
+        }
+
+        if let previous = lastCapturedBGSequence, sequence == previous &+ 1 {
+            consecutiveBGRun += 1
+        } else {
+            consecutiveBGRun = 1
+        }
+        lastCapturedBGSequence = sequence
+        longestConsecutiveBGRun = max(longestConsecutiveBGRun, consecutiveBGRun)
+
+        let item = String(
+            format: "%@ · BG %d · Seq %u · age %ds · trend %+.1f · state %d · ts %u",
+            timestamp(),
+            glucose,
+            sequence,
+            ageSeconds,
+            trend,
+            algorithmState,
+            messageTimestamp
+        )
+        capturedBGReadings.append(item)
+        addEvent(
+            "VALIDIERUNG BG#\(capturedBGReadings.count) · Serie \(consecutiveBGRun)/\(targetConsecutiveBGReadings) · \(item)"
+        )
+    }
+
+    private func validationStatusLine() -> String {
+        let base = "BG \(capturedBGReadings.count) unique · Serie \(consecutiveBGRun)/\(targetConsecutiveBGReadings) · Max \(longestConsecutiveBGRun)"
+        if latestPassiveBGSummary.isEmpty {
+            return base
+        }
+        return "\(base) · \(latestPassiveBGSummary)"
+    }
+
+    private func appendValidationSummaryEvents() {
+        addEvent(
+            "BUILD15 ERGEBNIS · \(capturedBGReadings.count) unique BG · längste Serie \(longestConsecutiveBGRun)/\(targetConsecutiveBGReadings) · Duplikate \(duplicateBGPackets)"
+        )
+        for (index, item) in capturedBGReadings.enumerated() {
+            addEvent("ERGEBNIS #\(index + 1) · \(item)")
+        }
+    }
+
+    private func remainingSeconds() -> TimeInterval {
+        guard let deadline = overallDeadline else { return testWindowSeconds }
+        return max(0, deadline.timeIntervalSinceNow)
+    }
+
+    private func formatRemaining(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(ceil(seconds)))
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func addEvent(_ text: String) {
+        eventLog.append("\(timestamp())  \(text)")
+        if eventLog.count > 240 {
+            eventLog.removeFirst(eventLog.count - 240)
+        }
+    }
+
+    private func publish(_ status: String, finished: Bool = false) {
+        onUpdate(status, lastDeviceName, latestRXHex, false, eventLog.joined(separator: "\n"), finished)
+    }
+
+    private func resetPerAttemptData() {
+        expectedCharacteristics.removeAll()
+        pendingNotifyUUIDs.removeAll()
+        enabledNotifyUUIDs.removeAll()
+        failedNotifyUUIDs.removeAll()
+        rxCounts.removeAll()
+        firstRXAt = nil
+        latestRXHex = ""
+        latestPassiveBGSummary = ""
+    }
+
+    private func cancelPerAttemptTasks() {
+        retryTask?.cancel()
+        retryTask = nil
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        qualificationTask?.cancel()
+        qualificationTask = nil
+        gattTimeoutTask?.cancel()
+        gattTimeoutTask = nil
+        notifySetupTimeoutTask?.cancel()
+        notifySetupTimeoutTask = nil
+        passiveListenTask?.cancel()
+        passiveListenTask = nil
+        rxFinishTask?.cancel()
+        rxFinishTask = nil
+    }
+
+    private func cancelAllTasks() {
+        cancelPerAttemptTasks()
+        overallTimeoutTask?.cancel()
+        overallTimeoutTask = nil
+        statusTickTask?.cancel()
+        statusTickTask = nil
+    }
+
+    private func beginObservationWindow() {
+        guard running, central.state == .poweredOn, overallDeadline == nil else { return }
+
+        let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
+        protectedPeripheralIDs = Set(connected.map { $0.identifier })
+        addEvent("Bereits verbundene G7 geschützt: \(protectedPeripheralIDs.count)")
+        for id in protectedPeripheralIDs {
+            addEvent("GESCHÜTZT id=\(id.uuidString)")
+        }
+
+        overallDeadline = Date().addingTimeInterval(testWindowSeconds)
+        addEvent("Build15 Multi-Cycle-Fenster gestartet: 2700 s / 45 min")
+        armOverallTimeout()
+        scheduleStatusTick()
+        startScan()
+    }
+
+    private func armOverallTimeout() {
+        overallTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.running else { return }
+            self.addEvent(
+                "45-Min-Fenster beendet · Attempts=\(self.attemptCount) · BG=\(self.capturedBGReadings.count) · MaxSerie=\(self.longestConsecutiveBGRun)"
+            )
+            self.appendValidationSummaryEvents()
+            let finalStatus = "Build15 Zeitfenster beendet · \(self.validationStatusLine())"
+            if let peripheral = self.targetPeripheral,
+               peripheral.state == .connected || peripheral.state == .connecting {
+                self.requestLocalDisconnect(finalStatus: finalStatus, finish: true)
+            } else {
+                self.finishWithoutConnection(finalStatus)
+            }
+        }
+        overallTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + testWindowSeconds, execute: task)
+    }
+
+    private func scheduleStatusTick() {
+        statusTickTask?.cancel()
+        guard running else { return }
+
+        let remaining = remainingSeconds()
+        publish(
+            "Build15 · \(validationStatusLine()) · Rest \(formatRemaining(remaining)) · Attempts \(attemptCount)"
+        )
+
+        guard remaining > 0 else { return }
+        let task = DispatchWorkItem { [weak self] in
+            self?.scheduleStatusTick()
+        }
+        statusTickTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: task)
+    }
+
+    private func startScan() {
+        guard running, central.state == .poweredOn, targetPeripheral == nil else { return }
+        guard remainingSeconds() > 0 else { return }
+
+        central.stopScan()
+        central.scanForPeripherals(
+            withServices: [advertisementUUID],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        )
+        addEvent("SCAN FEBC aktiv · Name kein Filter · Rest \(formatRemaining(remainingSeconds()))")
+        publish("suche FEBC-G7-Fenster… \(formatRemaining(remainingSeconds()))")
+    }
+
+    private func scheduleRetry(_ reason: String) {
+        guard running else { return }
+
+        cancelPerAttemptTasks()
+        central.stopScan()
+        targetPeripheral = nil
+        connectedAt = nil
+        localDisconnectRequested = false
+        finishAfterLocalDisconnect = false
+        retryAfterLocalDisconnect = false
+        pendingFinalStatus = ""
+        resetPerAttemptData()
+
+        let remaining = remainingSeconds()
+        guard remaining > 0 else {
+            appendValidationSummaryEvents()
+            finishWithoutConnection("Build15 Zeitfenster beendet · \(validationStatusLine())")
+            return
+        }
+
+        addEvent("RETRY in 3 s · \(reason)")
+        publish("Fenster geschlossen · neuer Versuch in 3 s")
+
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.running else { return }
+            self.retryTask = nil
+            self.startScan()
+        }
+        retryTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + min(retryDelaySeconds, remaining), execute: task)
+    }
+
+    private func armConnectTimeout(for peripheral: CBPeripheral) {
+        connectTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self, self.running,
+                  let peripheral,
+                  self.targetPeripheral?.identifier == peripheral.identifier else { return }
+
+            self.addEvent("CONNECT timeout Attempt #\(self.attemptCount)")
+            if peripheral.state == .connected || peripheral.state == .connecting {
+                self.requestLocalDisconnect(finalStatus: "Connect-Timeout", retry: true)
+            } else {
+                self.scheduleRetry("Connect-Timeout")
+            }
+        }
+        connectTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + connectTimeoutSeconds, execute: task)
+    }
+
+    private func armGattTimeout(for peripheral: CBPeripheral, stage: String) {
+        gattTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self, self.running,
+                  let peripheral,
+                  self.targetPeripheral?.identifier == peripheral.identifier else { return }
+            self.addEvent("GATT timeout · \(stage)")
+            self.requestLocalDisconnect(finalStatus: "GATT-Timeout \(stage)", retry: true)
+        }
+        gattTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + gattTimeoutSeconds, execute: task)
+    }
+
+    private func armNotifySetupTimeout(for peripheral: CBPeripheral) {
+        notifySetupTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self, self.running,
+                  let peripheral,
+                  self.targetPeripheral?.identifier == peripheral.identifier else { return }
+            let waiting = self.pendingNotifyUUIDs.map { self.shortUUID($0) }.sorted().joined(separator: ",")
+            self.addEvent("NOTIFY setup timeout · offen=\(waiting)")
+            self.requestLocalDisconnect(finalStatus: "Notify-Setup-Timeout", retry: true)
+        }
+        notifySetupTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + notifySetupTimeoutSeconds, execute: task)
+    }
+
+    private func armPassiveListen(for peripheral: CBPeripheral) {
+        passiveListenTask?.cancel()
+
+        if rxTotal > 0 {
+            scheduleFinishAfterRX(for: peripheral)
+            return
+        }
+
+        addEvent("NOTIFY 4/4 aktiv · passiv \(Int(passiveListenSeconds)) s · Dexcom-TX=0")
+        publish("Notify 4/4 aktiv · warte passiv auf RX…")
+
+        let task = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self, self.running,
+                  let peripheral,
+                  self.targetPeripheral?.identifier == peripheral.identifier else { return }
+            self.addEvent("20 s Notify ohne RX")
+            self.requestLocalDisconnect(finalStatus: "Notify aktiv · 20 s ohne RX", retry: true)
+        }
+        passiveListenTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + passiveListenSeconds, execute: task)
+    }
+
+    private func scheduleFinishAfterRX(for peripheral: CBPeripheral) {
+        guard rxFinishTask == nil else { return }
+        passiveListenTask?.cancel()
+        passiveListenTask = nil
+
+        addEvent("SPONTAN-RX erkannt · sammle noch \(Int(captureAfterFirstRXSeconds)) s")
+        publish("Build15 · \(validationStatusLine()) · sammle RX-Fenster")
+
+        let task = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self, self.running,
+                  let peripheral,
+                  self.targetPeripheral?.identifier == peripheral.identifier else { return }
+
+            let reachedTarget = self.consecutiveBGRun >= self.targetConsecutiveBGReadings
+            if reachedTarget {
+                self.addEvent("ZIEL ERREICHT · 6 fortlaufende G7-BG-Sequenzen")
+                self.appendValidationSummaryEvents()
+                self.requestLocalDisconnect(
+                    finalStatus: "Build15 BESTÄTIGT · \(self.validationStatusLine()) · Dexcom-TX 0",
+                    finish: true
+                )
+            } else {
+                self.requestLocalDisconnect(
+                    finalStatus: "Build15 Fenster erfasst · \(self.validationStatusLine()) · Dexcom-TX 0",
+                    retry: true
+                )
+            }
+        }
+        rxFinishTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + captureAfterFirstRXSeconds, execute: task)
+    }
+
+    private func requestLocalDisconnect(
+        finalStatus: String,
+        finish: Bool = false,
+        retry: Bool = false
+    ) {
+        guard running else { return }
+
+        central.stopScan()
+        qualificationTask?.cancel()
+        qualificationTask = nil
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        gattTimeoutTask?.cancel()
+        gattTimeoutTask = nil
+        notifySetupTimeoutTask?.cancel()
+        notifySetupTimeoutTask = nil
+        passiveListenTask?.cancel()
+        passiveListenTask = nil
+        rxFinishTask?.cancel()
+        rxFinishTask = nil
+
+        pendingFinalStatus = finalStatus
+        finishAfterLocalDisconnect = finish
+        retryAfterLocalDisconnect = retry
+
+        guard let peripheral = targetPeripheral,
+              peripheral.state == .connected || peripheral.state == .connecting else {
+            if finish {
+                finishWithoutConnection(finalStatus)
+            } else if retry {
+                scheduleRetry(finalStatus)
+            } else {
+                finishWithoutConnection(finalStatus)
+            }
+            return
+        }
+
+        localDisconnectRequested = true
+        addEvent("LOCAL CANCEL angefordert · \(finalStatus)")
+        central.cancelPeripheralConnection(peripheral)
+    }
+
+    private func finishWithoutConnection(_ status: String) {
+        guard running else { return }
+
+        running = false
+        central.stopScan()
+        cancelAllTasks()
+        targetPeripheral = nil
+        connectedAt = nil
+        addEvent(status)
+        publish(status, finished: true)
+    }
+
+    private func finishRemoteAfterRX(_ status: String) {
+        guard running else { return }
+
+        running = false
+        central.stopScan()
+        cancelAllTasks()
+        targetPeripheral = nil
+        connectedAt = nil
+        addEvent(status)
+        publish(status, finished: true)
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard running else { return }
+
+        switch central.state {
+        case .poweredOn:
+            addEvent("Bluetooth poweredOn")
+            beginObservationWindow()
+        case .poweredOff:
+            finishWithoutConnection("Bluetooth aus")
+        case .unauthorized:
+            finishWithoutConnection("Bluetooth-Berechtigung fehlt")
+        case .unsupported:
+            finishWithoutConnection("CoreBluetooth nicht unterstützt")
+        case .resetting:
+            addEvent("Bluetooth resetting")
+            publish("Bluetooth wird zurückgesetzt")
+        case .unknown:
+            addEvent("Bluetooth unknown")
+            publish("Bluetooth-Status unbekannt")
+        @unknown default:
+            addEvent("Bluetooth unknown default")
+            publish("Bluetooth-Status unbekannt")
+        }
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didDiscover peripheral: CBPeripheral,
+        advertisementData: [String : Any],
+        rssi RSSI: NSNumber
+    ) {
+        guard running, targetPeripheral == nil else { return }
+
+        let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let connectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue
+        let name = peripheral.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "")
+        let displayName = name.isEmpty ? "FEBC/ohne Namen" : name
+        let servicesText = advertisedServices.isEmpty
+            ? "nicht geliefert (Scanfilter FEBC)"
+            : advertisedServices.map { $0.uuidString.uppercased() }.joined(separator: ",")
+        let connectableText = connectable.map { $0 ? "ja" : "nein" } ?? "unbekannt"
+
+        // Name-independent identity: scanForPeripherals is already filtered to FEBC.
+        // If service UUIDs are present in the callback, require FEBC as an extra check.
+        if !advertisedServices.isEmpty && !advertisedServices.contains(advertisementUUID) {
+            addEvent("ADV ignoriert · FEBC fehlt trotz Scanfilter")
+            return
+        }
+
+        addEvent("ADV \(displayName) RSSI=\(RSSI) dBm conn=\(connectableText)")
+        addEvent("MATCH=FEBC · Name nur Anzeige")
+        addEvent("ADV services=\(servicesText)")
+        addEvent("ADV id=\(peripheral.identifier.uuidString)")
+
+        guard !protectedPeripheralIDs.contains(peripheral.identifier) else {
+            addEvent("ADV ignoriert · geschützter Peripheral")
+            publish("bereits verbundenen G7 geschützt")
+            return
+        }
+
+        guard connectable != false else {
+            addEvent("ADV ignoriert · nicht connectable")
+            return
+        }
+
+        central.stopScan()
+        targetPeripheral = peripheral
+        peripheral.delegate = self
+        lastDeviceName = displayName
+        connectedAt = nil
+        localDisconnectRequested = false
+        finishAfterLocalDisconnect = false
+        retryAfterLocalDisconnect = false
+        pendingFinalStatus = ""
+        resetPerAttemptData()
+        attemptCount += 1
+
+        addEvent("Attempt #\(attemptCount) · CONNECT \(displayName)")
+        publish("FEBC-Kandidat · verbinde · Name nicht als ID verwendet")
+        central.connect(peripheral, options: nil)
+        armConnectTimeout(for: peripheral)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        connectedAt = Date()
+        let liveName = peripheral.name ?? ""
+        if !liveName.isEmpty { lastDeviceName = liveName }
+
+        addEvent("CONNECTED #\(attemptCount) \(lastDeviceName)")
+        addEvent("Connected time: \(timestamp(connectedAt!))")
+        publish("verbunden · 250 ms Stabilitätstest · noch kein Notify")
+
+        qualificationTask?.cancel()
+        let task = DispatchWorkItem { [weak self, weak peripheral] in
+            guard let self, self.running,
+                  let peripheral,
+                  self.targetPeripheral?.identifier == peripheral.identifier,
+                  peripheral.state == .connected else { return }
+
+            self.addEvent("Connection ≥250 ms · discoverServices 3532")
+            self.publish("≥250 ms stabil · prüfe G7-Service 3532")
+            peripheral.discoverServices([self.serviceUUID])
+            self.armGattTimeout(for: peripheral, stage: "Service 3532")
+        }
+        qualificationTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + minStableConnectionSeconds, execute: task)
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
+        addEvent("didFailToConnect #\(attemptCount) error=\(error?.localizedDescription ?? "nil")")
+        scheduleRetry("Connect fehlgeschlagen")
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        cancelPerAttemptTasks()
+
+        let source = localDisconnectRequested ? "LOCAL" : "REMOTE/COREBT"
+        addEvent("DISCONNECT #\(attemptCount) source=\(source)")
+        addEvent("didDisconnect error=\(error?.localizedDescription ?? "nil")")
+        addEvent("Connected→Disconnect: \(elapsedMS(from: connectedAt))")
+
+        if localDisconnectRequested {
+            let finalStatus = pendingFinalStatus
+            let shouldFinish = finishAfterLocalDisconnect
+            let shouldRetry = retryAfterLocalDisconnect
+
+            localDisconnectRequested = false
+            finishAfterLocalDisconnect = false
+            retryAfterLocalDisconnect = false
+            pendingFinalStatus = ""
+
+            if shouldFinish {
+                running = false
+                central.stopScan()
+                cancelAllTasks()
+                targetPeripheral = nil
+                connectedAt = nil
+                publish(finalStatus.isEmpty ? "lokaler Disconnect bestätigt" : finalStatus, finished: true)
+            } else if shouldRetry {
+                scheduleRetry(finalStatus.isEmpty ? "lokaler Retry-Disconnect" : finalStatus)
+            } else {
+                finishWithoutConnection(finalStatus.isEmpty ? "lokaler Disconnect bestätigt" : finalStatus)
+            }
+        } else if consecutiveBGRun >= targetConsecutiveBGReadings {
+            appendValidationSummaryEvents()
+            finishRemoteAfterRX("Build15 BESTÄTIGT · \(validationStatusLine()) · Dexcom-TX 0")
+        } else if rxTotal > 0 {
+            scheduleRetry("Remote-Disconnect nach RX · \(validationStatusLine())")
+        } else {
+            scheduleRetry("Remote-Disconnect nach \(elapsedMS(from: connectedAt))")
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        gattTimeoutTask?.cancel()
+        gattTimeoutTask = nil
+
+        guard error == nil,
+              let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) else {
+            addEvent("Service discovery error=\(error?.localizedDescription ?? "nil")")
+            requestLocalDisconnect(finalStatus: "Kein G7-Service 3532 · verwerfe Kandidat", retry: true)
+            return
+        }
+
+        addEvent("G7-FINGERPRINT Stufe 2: Service 3532")
+        publish("3532 bestätigt · prüfe 3534/3535/3536/3538")
+        peripheral.discoverCharacteristics(nil, for: service)
+        armGattTimeout(for: peripheral, stage: "Characteristics")
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        gattTimeoutTask?.cancel()
+        gattTimeoutTask = nil
+
+        guard error == nil else {
+            addEvent("Characteristic discovery error=\(error?.localizedDescription ?? "nil")")
+            requestLocalDisconnect(finalStatus: "Characteristics nicht lesbar", retry: true)
+            return
+        }
+
+        let discovered = service.characteristics ?? []
+        addEvent("GATT Characteristics: \(discovered.count)")
+        for characteristic in discovered {
+            addEvent("\(shortUUID(characteristic.uuid)) props=\(propertyText(characteristic))")
+        }
+
+        let byUUID = Dictionary(uniqueKeysWithValues: discovered.map { ($0.uuid, $0) })
+        let expectedFound = expectedChannelUUIDs.filter { byUUID[$0] != nil }
+        addEvent("G7-FINGERPRINT: \(expectedFound.count)/4 erwartete Channels")
+
+        guard expectedFound.count == expectedChannelUUIDs.count else {
+            requestLocalDisconnect(finalStatus: "GATT-Fingerprint unvollständig · kein G7-Match", retry: true)
+            return
+        }
+
+        expectedCharacteristics = byUUID.filter { expectedChannelUUIDs.contains($0.key) }
+        pendingNotifyUUIDs = Set(expectedChannelUUIDs)
+        enabledNotifyUUIDs.removeAll()
+        failedNotifyUUIDs.removeAll()
+
+        addEvent("G7-MATCH bestätigt · FEBC + 3532 + 4/4 · Name irrelevant")
+        publish("G7-Match bestätigt · aktiviere Notify 3534/35/36/38")
+
+        for uuid in expectedChannelUUIDs {
+            guard let characteristic = expectedCharacteristics[uuid] else { continue }
+            guard characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate) else {
+                pendingNotifyUUIDs.remove(uuid)
+                failedNotifyUUIDs.insert(uuid)
+                addEvent("SUBSCRIBE \(shortUUID(uuid)) nicht unterstützt")
+                continue
+            }
+            addEvent("SUBSCRIBE \(shortUUID(uuid)) · CCCD only")
+            peripheral.setNotifyValue(true, for: characteristic)
+        }
+
+        if !failedNotifyUUIDs.isEmpty {
+            requestLocalDisconnect(finalStatus: "Nicht alle G7-Channels unterstützen Notify", retry: true)
+            return
+        }
+
+        armNotifySetupTimeout(for: peripheral)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+        guard expectedChannelUUIDs.contains(characteristic.uuid) else { return }
+
+        pendingNotifyUUIDs.remove(characteristic.uuid)
+
+        if let error {
+            failedNotifyUUIDs.insert(characteristic.uuid)
+            addEvent("NOTIFY \(shortUUID(characteristic.uuid)) ERROR=\(error.localizedDescription)")
+        } else if characteristic.isNotifying {
+            enabledNotifyUUIDs.insert(characteristic.uuid)
+            addEvent("NOTIFY \(shortUUID(characteristic.uuid)) ON")
+        } else {
+            failedNotifyUUIDs.insert(characteristic.uuid)
+            addEvent("NOTIFY \(shortUUID(characteristic.uuid)) OFF/unerwartet")
+        }
+
+        publish("Notify \(enabledNotifyUUIDs.count)/4 · offen \(pendingNotifyUUIDs.count) · RX \(rxTotal)")
+
+        guard pendingNotifyUUIDs.isEmpty else { return }
+
+        notifySetupTimeoutTask?.cancel()
+        notifySetupTimeoutTask = nil
+
+        guard failedNotifyUUIDs.isEmpty, enabledNotifyUUIDs.count == expectedChannelUUIDs.count else {
+            requestLocalDisconnect(finalStatus: "Notify-Setup nicht 4/4", retry: true)
+            return
+        }
+
+        armPassiveListen(for: peripheral)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard running, targetPeripheral?.identifier == peripheral.identifier else { return }
+        guard expectedChannelUUIDs.contains(characteristic.uuid) else { return }
+
+        if let error {
+            addEvent("RX \(shortUUID(characteristic.uuid)) ERROR=\(error.localizedDescription)")
+            publish("Notify RX-Fehler auf \(shortUUID(characteristic.uuid))")
+            return
+        }
+
+        guard let data = characteristic.value else {
+            addEvent("RX \(shortUUID(characteristic.uuid)) value=nil")
+            return
+        }
+
+        let count = (rxCounts[characteristic.uuid] ?? 0) + 1
+        rxCounts[characteristic.uuid] = count
+        let packetHex = hex(data)
+        latestRXHex = "\(shortUUID(characteristic.uuid)) #\(count) \(packetHex)"
+        addEvent("RX \(shortUUID(characteristic.uuid)) #\(count) len=\(data.count) HEX=\(packetHex)")
+
+        if firstRXAt == nil {
+            firstRXAt = Date()
+            addEvent("ERSTER SPONTAN-RX · nach \(elapsedMS(from: connectedAt))")
+        }
+
+        if let decoded = passivePacketSummary(data, characteristic: characteristic) {
+            addEvent("KLASSE: \(decoded)")
+            if decoded.hasPrefix("PASSIV-BG ") {
+                latestPassiveBGSummary = decoded
+                recordPassiveBGPacket(data)
+            }
+        }
+
+        if latestPassiveBGSummary.isEmpty {
+            publish("Spontan-RX \(rxTotal) · letzter \(shortUUID(characteristic.uuid)) · Dexcom-TX 0")
+        } else {
+            publish("\(latestPassiveBGSummary) · RX \(rxTotal) · TX 0")
+        }
+        scheduleFinishAfterRX(for: peripheral)
+    }
+}
+
+// MARK: - Direct G7 BLE manager
+// MARK: - Direct G7 BLE manager
+// MARK: - Direct G7 BLE manager
+
+private struct DirectG7Reading {
+    let glucoseMgDl: Double
+    let date: Date
+    let trendMgDlPerMinute: Double?
+    let sequence: UInt16
+    let sensorAgeSeconds: TimeInterval
+    let algorithmStateRaw: UInt8
+}
+
+private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    private let advertisementUUID = CBUUID(string: "FEBC")
+    private let serviceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
+    private let controlUUID = CBUUID(string: "F8083534-849E-531C-C594-30F1F86A4EA5")
+    private let authUUID = CBUUID(string: "F8083535-849E-531C-C594-30F1F86A4EA5")
+
+    private let onState: (String, String, Bool) -> Void
+    private let onReading: (DirectG7Reading) -> Void
+
+    private var central: CBCentralManager!
+    private var targetPeripheral: CBPeripheral?
+    private var enabled = false
+    private var authenticated = false
+    private var pendingGlucosePacket: Data?
+    private var authTimeoutTask: DispatchWorkItem?
+    private var reconnectTask: DispatchWorkItem?
+    private var lastDeviceName = ""
+
+    // Build 41: persistent BLE lifecycle trace. This deliberately lives inside the existing
+    // direct-G7 manager so no Watch UI or complication code needs to change.
+    private let lifecycleTraceKey41 = "xdrip.g7Direct.lifecycleTrace41"
+
+    private func trace41(_ event: String) {
+        guard let defaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else { return }
+        var events = defaults.stringArray(forKey: lifecycleTraceKey41) ?? []
+        events.append("\(Date().timeIntervalSince1970)|\(event)")
+        if events.count > 80 {
+            events.removeFirst(events.count - 80)
+        }
+        defaults.set(events, forKey: lifecycleTraceKey41)
+    }
+
+    private func traceTail41() -> String {
+        guard let defaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else { return "no-app-group" }
+        let events = defaults.stringArray(forKey: lifecycleTraceKey41) ?? []
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+
+        return events.suffix(8).map { item in
+            let parts = item.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let ts = Double(parts[0]) else { return item }
+            return "\(formatter.string(from: Date(timeIntervalSince1970: ts))) \(parts[1])"
+        }.joined(separator: " · ")
+    }
+
+    init(
+        onState: @escaping (String, String, Bool) -> Void,
+        onReading: @escaping (DirectG7Reading) -> Void
+    ) {
+        self.onState = onState
+        self.onReading = onReading
+        super.init()
+
+        central = CBCentralManager(
+            delegate: self,
+            queue: .main,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"]
+        )
+    }
+
+    func start() {
+        enabled = true
+        trace41("START central=\(central.state.rawValue)")
+        if central.state == .poweredOn {
+            beginDiscovery()
+        }
+    }
+
+    private func publish(_ status: String) {
+        onState("L41 \(status) | \(traceTail41())", lastDeviceName, authenticated)
+    }
+
+    private func beginDiscovery() {
+        guard enabled, central.state == .poweredOn, targetPeripheral == nil else { return }
+
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        trace41("SCAN begin")
+        publish("suche G7…")
+
+        let connected = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
+        if let peripheral = connected.first(where: { ($0.name ?? "").hasPrefix("DX") }) ?? connected.first {
+            inspect(peripheral)
+            return
+        }
+
+        central.scanForPeripherals(
+            withServices: [advertisementUUID],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
+    }
+
+    private func inspect(_ peripheral: CBPeripheral) {
+        guard enabled, targetPeripheral == nil else { return }
+
+        central.stopScan()
+        targetPeripheral = peripheral
+        peripheral.delegate = self
+        lastDeviceName = peripheral.name ?? "unbekannt"
+        authenticated = false
+        pendingGlucosePacket = nil
+        trace41("DISCOVER \(lastDeviceName) state=\(peripheral.state.rawValue)")
+        publish("G7 gefunden; verbinde…")
+        central.connect(peripheral, options: nil)
+    }
+
+    private func scheduleReconnect() {
+        trace41("RECONNECT scheduled")
+        reconnectTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.enabled, self.targetPeripheral == nil else { return }
+            self.beginDiscovery()
+        }
+        reconnectTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: task)
+    }
+
+    private func armAuthenticationTimeout(for peripheral: CBPeripheral) {
+        authTimeoutTask?.cancel()
+        let peripheralID = peripheral.identifier
+        let task = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.enabled,
+                  self.targetPeripheral?.identifier == peripheralID,
+                  !self.authenticated else { return }
+
+            self.publish("keine Auth-Freigabe; suche anderen G7…")
+            self.central.cancelPeripheralConnection(peripheral)
+        }
+        authTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: task)
+    }
+
+    private func parseG7Glucose(_ data: Data) -> DirectG7Reading? {
+        guard data.count >= 19, data[0] == 0x4E, data[1] == 0x00 else { return nil }
+
+        let glucoseRaw = littleEndianUInt16(data, offset: 12)
+        guard glucoseRaw != 0xFFFF else { return nil }
+
+        let glucose = Double(glucoseRaw & 0x0FFF)
+        guard glucose > 0 else { return nil }
+
+        let sequence = littleEndianUInt16(data, offset: 6)
+        let messageTimestamp = littleEndianUInt32(data, offset: 2)
+        let messageAge = TimeInterval(data[10])
+        let sensorAge = TimeInterval(messageTimestamp) + messageAge
+        let readingDate = Date().addingTimeInterval(-messageAge)
+
+        let trend: Double?
+        if data[15] == 0x7F {
+            trend = nil
+        } else {
+            trend = Double(Int8(bitPattern: data[15])) / 10.0
+        }
+
+        return DirectG7Reading(
+            glucoseMgDl: glucose,
+            date: readingDate,
+            trendMgDlPerMinute: trend,
+            sequence: sequence,
+            sensorAgeSeconds: sensorAge,
+            algorithmStateRaw: data[14]
+        )
+    }
+
+    private func littleEndianUInt16(_ data: Data, offset: Int) -> UInt16 {
+        UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+
+    private func littleEndianUInt32(_ data: Data, offset: Int) -> UInt32 {
+        UInt32(data[offset])
+            | (UInt32(data[offset + 1]) << 8)
+            | (UInt32(data[offset + 2]) << 16)
+            | (UInt32(data[offset + 3]) << 24)
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        trace41("CENTRAL state=\(central.state.rawValue)")
+        switch central.state {
+        case .poweredOn:
+            publish("Bluetooth ein")
+            beginDiscovery()
+        case .poweredOff:
+            publish("Bluetooth aus")
+        case .unauthorized:
+            publish("Bluetooth-Berechtigung fehlt")
+        case .unsupported:
+            publish("CoreBluetooth nicht unterstützt")
+        case .resetting:
+            publish("Bluetooth wird zurückgesetzt")
+        case .unknown:
+            publish("Bluetooth-Status unbekannt")
+        @unknown default:
+            publish("Bluetooth-Status unbekannt")
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
+        let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+        let restoredState = restored.first?.state.rawValue ?? -1
+        trace41("RESTORE count=\(restored.count) state=\(restoredState)")
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
+           let peripheral = peripherals.first {
+            enabled = true
+            targetPeripheral = peripheral
+            peripheral.delegate = self
+            lastDeviceName = peripheral.name ?? "unbekannt"
+            authenticated = false
+            publish("G7-Verbindung wiederhergestellt")
+
+            if peripheral.state == .connected {
+                peripheral.discoverServices([serviceUUID])
+            } else {
+                central.connect(peripheral, options: nil)
+            }
+        }
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didDiscover peripheral: CBPeripheral,
+        advertisementData: [String : Any],
+        rssi RSSI: NSNumber
+    ) {
+        let name = peripheral.name ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "")
+        guard name.hasPrefix("DX") else { return }
+        inspect(peripheral)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        trace41("CONNECTED \(peripheral.name ?? "unknown")")
+        lastDeviceName = peripheral.name ?? lastDeviceName
+        publish("BLE verbunden; prüfe G7-Service…")
+        armAuthenticationTimeout(for: peripheral)
+        peripheral.discoverServices([serviceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        trace41("CONNECT_FAIL err=\(error?.localizedDescription ?? "nil")")
+        if targetPeripheral?.identifier == peripheral.identifier {
+            targetPeripheral = nil
+        }
+        authenticated = false
+        publish("Verbindung fehlgeschlagen; neuer Versuch…")
+        scheduleReconnect()
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        trace41("DISCONNECT err=\(error?.localizedDescription ?? "nil") state=\(peripheral.state.rawValue)")
+        guard targetPeripheral?.identifier == peripheral.identifier else { return }
+
+        authTimeoutTask?.cancel()
+        authTimeoutTask = nil
+        targetPeripheral = nil
+        authenticated = false
+        pendingGlucosePacket = nil
+        publish("G7 getrennt; verbinde erneut…")
+        scheduleReconnect()
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if error != nil {
+            publish("G7-Service-Suche fehlgeschlagen")
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        guard let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) else {
+            publish("kein G7-Service; suche weiter…")
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        publish("G7-Service gefunden; aktiviere Notify…")
+        peripheral.discoverCharacteristics(nil, for: service)
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        if error != nil {
+            publish("Characteristic-Suche fehlgeschlagen")
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        let notifyCharacteristics = (service.characteristics ?? []).filter {
+            $0.properties.contains(.notify) || $0.properties.contains(.indicate)
+        }
+
+        guard !notifyCharacteristics.isEmpty else {
+            publish("keine G7-Notify-Kanäle")
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        for characteristic in notifyCharacteristics where !characteristic.isNotifying {
+            peripheral.setNotifyValue(true, for: characteristic)
+        }
+
+        publish("Notify aktiv; warte auf Dexcom-Auth…")
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        trace41("NOTIFY \(characteristic.uuid.uuidString.suffix(4)) on=\(characteristic.isNotifying) err=\(error?.localizedDescription ?? "nil")")
+        if let error {
+            publish("Notify-Fehler: \(error.localizedDescription)")
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard error == nil, let value = characteristic.value, !value.isEmpty else { return }
+
+        if characteristic.uuid == authUUID, value.count >= 3, value[0] == 0x05 {
+            authenticated = value[1] == 0x01 && value[2] != 0x02
+
+            if authenticated {
+                authTimeoutTask?.cancel()
+                authTimeoutTask = nil
+                publish("Dexcom-authentifiziert · Direct aktiv")
+
+                if let pendingGlucosePacket,
+                   let reading = parseG7Glucose(pendingGlucosePacket) {
+                    self.pendingGlucosePacket = nil
+                    onReading(reading)
+                }
+            } else {
+                publish("Dexcom-Auth nicht freigegeben")
+            }
+            return
+        }
+
+        guard characteristic.uuid == controlUUID, value[0] == 0x4E else { return }
+
+        let seq41 = value.count >= 8 ? littleEndianUInt16(value, offset: 6) : 0
+        let bg41 = value.count >= 14 ? Int(littleEndianUInt16(value, offset: 12) & 0x0FFF) : -1
+        trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
+
+        guard authenticated else {
+            pendingGlucosePacket = value
+            publish("0x4E empfangen; warte auf Auth-Freigabe")
+            return
+        }
+
+        guard let reading = parseG7Glucose(value) else {
+            publish("0x4E empfangen; Parser abgelehnt")
+            return
+        }
+
+        publish("Direct BG \(Int(reading.glucoseMgDl)) mg/dL")
+        onReading(reading)
     }
 }
 
@@ -845,6 +2366,12 @@ extension WatchStateModel: WCSessionDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self.requestingDataIconColor = ConstantsAppleWatch.requestingDataIconColorInactive
             }
+        }
+    }
+
+    func session(_: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        DispatchQueue.main.async {
+            self.processWatchPayloadFromDictionary(dictionary: applicationContext)
         }
     }
 

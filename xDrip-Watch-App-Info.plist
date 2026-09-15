@@ -6,5 +6,11 @@
 	<string>$(APP_GROUP_IDENTIFIER)</string>
 	<key>MainAppBundleIdentifier</key>
 	<string>$(MAIN_APP_BUNDLE_IDENTIFIER)</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>xDrip uses Bluetooth to receive glucose notifications directly from the active Dexcom G7 sensor on Apple Watch.</string>
 </dict>
 </plist>

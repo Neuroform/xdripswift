@@ -6,6 +6,7 @@
 //  Copyright © 2024 Johan Degraeve. All rights reserved.
 //
 
+import Foundation
 import SwiftUI
 
 struct RootView: View {
@@ -31,6 +32,10 @@ struct RootView: View {
             // large number page
             BigNumberView()
                 .tag(WatchAppPage.bigNumber.rawValue)
+
+            // Personal direct-G7 status page. Collection runs automatically in WatchStateModel.
+            G7DirectStatusView()
+                .tag(WatchAppPage.g7Direct.rawValue)
         }
         .modifier(RootViewTabViewStyleModifier())
         .environmentObject(watchState)
@@ -47,6 +52,109 @@ private enum WatchAppPage: Int {
     case main = 0
     case agp = 1
     case bigNumber = 2
+    case g7Direct = 3
+}
+
+private struct G7DirectStatusView: View {
+    @EnvironmentObject var watchState: WatchStateModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("G7 Direct")
+                    .font(.headline)
+
+                Text("Build 15 Multi-Cycle Validation · 6 direkte BG")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                row("Status", watchState.directG7Status)
+
+                if !watchState.directG7DeviceName.isEmpty {
+                    row("Gerät", watchState.directG7DeviceName)
+                }
+
+                row("Authentifiziert", watchState.directG7Authenticated ? "ja" : "nein")
+                row("Aktive BG-Quelle", watchState.bgDataSource)
+
+                if let value = watchState.directG7LastValue {
+                    row("Letzter Direct-BG", "\(Int(value.rounded())) mg/dL")
+                }
+
+                if let date = watchState.directG7LastDate {
+                    row("Direct-Zeit", date.formatted(date: .omitted, time: .standard))
+                }
+
+                if let trend = watchState.directG7LastTrend {
+                    row("Trend", String(format: "%+.1f mg/dL/min", trend))
+                }
+
+                if let sequence = watchState.directG7LastSequence {
+                    row("Sequenz", "\(sequence)")
+                }
+
+                row("Direct-Werte", "\(watchState.directG7ReadingCount)")
+
+                Divider()
+
+                Text("Build 15 G7 Multi-Cycle-Validierung")
+                    .font(.headline)
+
+                Text("Build 15 validiert die in Build 14 bestätigte direkte G7-BG-Decodierung über mehrere Messzyklen. Nach Tippen läuft der Test bis zu 45 Minuten und sucht über FEBC + Service 3532 + 3534/3535/3536/3538 wiederholt nach G7-Verbindungsfenstern. Ziel sind 6 fortlaufende 0x4E-BG-Sequenzen. BG, Alter, Trend, Sequenz und State werden nur diagnostisch protokolliert. Der Wert wird weiterhin NICHT in den xDrip-Graph oder die Komplikation geschrieben. Dexcom-Anwendungs-TX bleibt 0.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                row("Multi-Cycle", watchState.g7AuthProbeStatus)
+
+                if !watchState.g7AuthProbeDeviceName.isEmpty {
+                    row("Probe-Gerät", watchState.g7AuthProbeDeviceName)
+                }
+
+                if !watchState.g7AuthProbeResponseHex.isEmpty {
+                    row("Letzte Auth-Antwort", watchState.g7AuthProbeResponseHex)
+                }
+
+                if watchState.g7AuthProbeChallengeReceived {
+                    Text("✓ Separate 0x03-Challenge erhalten · keine Antwort gesendet")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+
+                if !watchState.g7AuthProbeTelemetry.isEmpty {
+                    Text("Telemetrie")
+                        .font(.headline)
+                    Text(watchState.g7AuthProbeTelemetry)
+                        .font(.system(size: 9, design: .monospaced))
+                }
+
+                Button(watchState.g7AuthProbeRunning ? "Validierung abbrechen" : "Validierung starten") {
+                    if watchState.g7AuthProbeRunning {
+                        watchState.stopG7AuthProbe()
+                    } else {
+                        watchState.startG7AuthProbe()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+
+                Text("Während der Build-15-Validierung bitte die Dexcom-App bzw. Dexcom-Komplikation zum Zeitvergleich beobachten. Jeder neue direkte BG wird mit Uhrzeit, Sequenz, Alter, Trend und State protokolliert. Nach einem kurzen RX-Fenster trennt die Diagnoseverbindung und sucht das nächste G7-Fenster. Es gibt weiterhin keinen Dexcom-Anwendungs-TX, keinen Background-Reconnect und keine Übernahme des Diagnosewerts in xDrip oder die Komplikation. --- bleibt die Sicherheitsanzeige ohne aktuellen freigegebenen Wert.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+        }
+    }
 }
 
 #if os(watchOS)
