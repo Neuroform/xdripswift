@@ -2139,19 +2139,14 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     }
 
     private func armAuthenticationTimeout(for peripheral: CBPeripheral) {
+        // Build 46: DO NOT tear down a proven Direct-G7 Notify subscription after 20 seconds.
+        // Build 45 demonstrated that valid 0x4E glucose packets reach the direct widget bridge
+        // before the legacy app-level authentication flag changes. Cancelling this connection
+        // destroyed the very background subscription that must survive while the Watch UI sleeps.
+        // Real BLE failures/disconnects are still handled by didFailToConnect/didDisconnectPeripheral.
         authTimeoutTask?.cancel()
-        let peripheralID = peripheral.identifier
-        let task = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.enabled,
-                  self.targetPeripheral?.identifier == peripheralID,
-                  !self.authenticated else { return }
-
-            self.publish("keine Auth-Freigabe; suche anderen G7…")
-            self.central.cancelPeripheralConnection(peripheral)
-        }
-        authTimeoutTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: task)
+        authTimeoutTask = nil
+        trace41("AUTH watchdog bypassed; keep notify subscription alive id=\(peripheral.identifier.uuidString)")
     }
 
     private func parseG7Glucose(_ data: Data) -> DirectG7Reading? {
@@ -2473,13 +2468,16 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             return
         }
 
-        // Build 43: the widget payload is updated immediately from the sensor packet.
-        // This deliberately happens BEFORE the existing WatchStateModel/auth gate.
+        // Build 43/46: every valid sensor packet goes directly to the existing widgets.
+        // A received 0x4E also proves that this is the correct live G7 connection, so any legacy
+        // auth watchdog must remain cancelled and the GATT Notify subscription must stay intact.
+        authTimeoutTask?.cancel()
+        authTimeoutTask = nil
         publishReadingDirectlyToWidgets(reading)
 
         guard authenticated else {
             pendingGlucosePacket = value
-            publish("0x4E empfangen · Widgets direkt aktualisiert")
+            publish("0x4E empfangen · Widgets direkt aktualisiert · Notify bleibt aktiv")
             return
         }
 
