@@ -1,0 +1,239 @@
+name: Personal xDrip G7 Watch Build 50
+run-name: G7 Watch Build 50 Isolated Bond Promotion (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build50_isolated_bond_promotion.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 50
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout Build 49 baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build49-system-autoreconnect
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Freeze completed UI widgets and transports
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch App/xDripWatchApp.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist' \
+            'xDrip/xDrip.xcconfig' \
+            'xDrip/Supporting Files/Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build50-frozen.sha
+          done
+
+      - name: Apply isolated verified-peer bond promotion
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('xDrip Watch App/DataModels/WatchStateModel.swift')
+          text = p.read_text(encoding='utf-8')
+          a = text.find('// MARK: - Direct G7 BLE manager')
+          b = text.find('// MARK: - WCSession delegate', a)
+          if a < 0 or b <= a:
+              raise RuntimeError('Direct G7 manager markers not found')
+          m = text[a:b]
+
+          def rep(old, new, label):
+              global m
+              n = m.count(old)
+              if n != 1:
+                  raise RuntimeError(f'{label}: expected exactly one match, found {n}')
+              m = m.replace(old, new, 1)
+
+          rep(
+              '    private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"\n',
+              '''    private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"\n\n    // Build 50: isolated bond promotion is allowed only on the exact CBPeripheral that has\n    // produced a valid parsed 0x4E glucose packet during this connection. The official Dexcom\n    // peer is never selected, modified, removed or whitelisted by this path.\n    private var verifiedReadingPeripheralID50: UUID?\n    private var authCharacteristic50: CBCharacteristic?\n    private var lastAuthAuthenticatedByte50: UInt8?\n    private var lastAuthBondState50: UInt8?\n    private var keepAliveSent50 = false\n    private var bondRequestSent50 = false\n\n    private func resetBondPromotionState50() {\n        verifiedReadingPeripheralID50 = nil\n        authCharacteristic50 = nil\n        lastAuthAuthenticatedByte50 = nil\n        lastAuthBondState50 = nil\n        keepAliveSent50 = false\n        bondRequestSent50 = false\n    }\n\n    private func authWriteType50(for characteristic: CBCharacteristic) -> CBCharacteristicWriteType? {\n        if characteristic.properties.contains(.write) { return .withResponse }\n        if characteristic.properties.contains(.writeWithoutResponse) { return .withoutResponse }\n        return nil\n    }\n\n    private func attemptIsolatedBondPromotion50(on peripheral: CBPeripheral) {\n        guard verifiedReadingPeripheralID50 == peripheral.identifier,\n              isVerifiedPeripheral(peripheral),\n              lastAuthAuthenticatedByte50 == 0x01 else {\n            trace41("B50_BOND blocked unverified-or-unauthenticated id=\\(peripheral.identifier.uuidString)")\n            return\n        }\n\n        // G7 status 05 01 02 is the new-pairing state. It requires the complete J-PAKE,\n        // certificate exchange and proof-of-possession sequence before 0x06/0x07. Build 50\n        // deliberately does not fake or skip those cryptographic phases.\n        if lastAuthBondState50 == 0x02 {\n            trace41("B50_BOND blocked requires-jpake-cert-pop status=050102")\n            publish("Build50: G7 verlangt J-PAKE/Certificate/PoP; Bond-TX sicher blockiert")\n            return\n        }\n\n        // Status 05 01 01 is the normal authenticated/bond-capable state. Only here do we\n        // issue the documented keep-alive. requestBond follows only after the sensor ACKs 06 00.\n        guard lastAuthBondState50 == 0x01 else {\n            trace41("B50_BOND blocked unknown-bond-state=\\(lastAuthBondState50.map(String.init) ?? \"nil\")")\n            return\n        }\n        guard !keepAliveSent50,\n              let characteristic = authCharacteristic50,\n              let writeType = authWriteType50(for: characteristic) else { return }\n\n        keepAliveSent50 = true\n        peripheral.writeValue(Data([0x06, 0x19]), for: characteristic, type: writeType)\n        trace41("B50_BOND TX 0619 keepalive verified-peer")\n        publish("Build50: verifizierter xDrip-G7-Peer · KeepAlive gesendet")\n    }\n\n    private func sendBondRequestAfterKeepAliveACK50(on peripheral: CBPeripheral) {\n        guard verifiedReadingPeripheralID50 == peripheral.identifier,\n              isVerifiedPeripheral(peripheral),\n              lastAuthAuthenticatedByte50 == 0x01,\n              lastAuthBondState50 == 0x01,\n              keepAliveSent50,\n              !bondRequestSent50,\n              let characteristic = authCharacteristic50,\n              let writeType = authWriteType50(for: characteristic) else {\n            trace41("B50_BOND request blocked guard")\n            return\n        }\n\n        bondRequestSent50 = true\n        peripheral.writeValue(Data([0x07]), for: characteristic, type: writeType)\n        trace41("B50_BOND TX 07 requestBond verified-peer")\n        publish("Build50: Bond-Anfrage ausschließlich an verifizierten xDrip-Peer gesendet")\n    }\n''',
+              'insert Build50 isolated bond state machine'
+          )
+
+          rep(
+              '''        targetPeripheral = peripheral\n        peripheral.delegate = self\n        lastDeviceName = peripheral.name ?? lastDeviceName''',
+              '''        targetPeripheral = peripheral\n        peripheral.delegate = self\n        resetBondPromotionState50()\n        lastDeviceName = peripheral.name ?? lastDeviceName''',
+              'reset Build50 state on connect'
+          )
+
+          rep(
+              '''        let notifyCharacteristics = (service.characteristics ?? []).filter {\n            $0.properties.contains(.notify) || $0.properties.contains(.indicate)\n        }''',
+              '''        authCharacteristic50 = (service.characteristics ?? []).first(where: { $0.uuid == authUUID })\n\n        let notifyCharacteristics = (service.characteristics ?? []).filter {\n            $0.properties.contains(.notify) || $0.properties.contains(.indicate)\n        }''',
+              'capture exact auth characteristic'
+          )
+
+          old_auth = '''        if characteristic.uuid == authUUID, value.count >= 3, value[0] == 0x05 {\n            authenticated = value[1] == 0x01 && value[2] != 0x02\n\n            if authenticated {\n                authTimeoutTask?.cancel()\n                authTimeoutTask = nil\n                publish("Dexcom-authentifiziert · Direct aktiv")\n\n                if let pendingGlucosePacket,\n                   let reading = parseG7Glucose(pendingGlucosePacket) {\n                    self.pendingGlucosePacket = nil\n                    onReading(reading)\n                }\n            } else {\n                publish("Dexcom-Auth nicht freigegeben")\n            }\n            return\n        }'''
+          new_auth = '''        if characteristic.uuid == authUUID {\n            if value.count >= 3, value[0] == 0x05 {\n                lastAuthAuthenticatedByte50 = value[1]\n                lastAuthBondState50 = value[2]\n                authenticated = value[1] == 0x01 && value[2] != 0x02\n                trace41(String(format: "B50_AUTH status=%02X%02X%02X", value[0], value[1], value[2]))\n\n                if value[1] == 0x01, value[2] == 0x02 {\n                    trace41("B50_BOND blocked requires-jpake-cert-pop status=050102")\n                    publish("Build50: Auth erkannt, vollständiges G7-Pairing erforderlich · keine Bond-TX")\n                } else if authenticated {\n                    authTimeoutTask?.cancel()\n                    authTimeoutTask = nil\n                    publish("Dexcom-authentifiziert · Direct aktiv · Build50 Bond-Guard bereit")\n                    attemptIsolatedBondPromotion50(on: peripheral)\n\n                    if let pendingGlucosePacket,\n                       let reading = parseG7Glucose(pendingGlucosePacket) {\n                        self.pendingGlucosePacket = nil\n                        onReading(reading)\n                    }\n                } else {\n                    publish("Dexcom-Auth nicht freigegeben")\n                }\n                return\n            }\n\n            if value.count >= 2, value[0] == 0x06 {\n                trace41(String(format: "B50_BOND RX keepalive=%02X", value[1]))\n                if value[1] == 0x00 {\n                    sendBondRequestAfterKeepAliveACK50(on: peripheral)\n                }\n                return\n            }\n\n            if value.count >= 2, value[0] == 0x07 {\n                trace41(String(format: "B50_BOND RX requestBondAck=%02X", value[1]))\n                return\n            }\n\n            if value.count >= 2, value[0] == 0x08 {\n                trace41(String(format: "B50_BOND RX bondComplete=%02X", value[1]))\n                if value[1] == 0x01 {\n                    publish("Build50: xDrip-G7 Bond bestätigt")\n                }\n                return\n            }\n\n            if let opcode = value.first, opcode == 0x0A || opcode == 0x0B || opcode == 0x0C {\n                trace41(String(format: "B50_BOND cryptographic-phase RX opcode=%02X; no synthetic reply", opcode))\n                return\n            }\n        }'''
+          rep(old_auth, new_auth, 'expand auth callback with guarded bond flow')
+
+          old_verify = '''        trace41("RX4E seq=\\(seq41) bg=\\(bg41) auth=\\(authenticated)")\n        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n        registerVerifiedConnectionEvents(peripheral.identifier)\n        trace41("VERIFIED_SOURCE id=\\(peripheral.identifier.uuidString) autoreconnect=armed")\n\n        guard let reading = parseG7Glucose(value) else {\n            publish("0x4E empfangen; Parser abgelehnt")\n            return\n        }'''
+          new_verify = '''        trace41("RX4E seq=\\(seq41) bg=\\(bg41) auth=\\(authenticated)")\n\n        guard let reading = parseG7Glucose(value) else {\n            publish("0x4E empfangen; Parser abgelehnt")\n            return\n        }\n\n        // Build 50 tightens the identity proof: persistence and any bond action happen only\n        // after parseG7Glucose accepted the 0x4E packet, never merely from an opcode match.\n        verifiedReadingPeripheralID50 = peripheral.identifier\n        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)\n        registerVerifiedConnectionEvents(peripheral.identifier)\n        trace41("VERIFIED_SOURCE id=\\(peripheral.identifier.uuidString) valid0x4E autoreconnect=armed")'''
+          rep(old_verify, new_verify, 'require valid parsed 0x4E before verification')
+
+          rep(
+              '''        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        publishReadingDirectlyToWidgets(reading)\n\n        guard authenticated else {''',
+              '''        authTimeoutTask?.cancel()\n        authTimeoutTask = nil\n        publishReadingDirectlyToWidgets(reading)\n        // Widget delivery remains first. Bond promotion is strictly secondary and guarded.\n        attemptIsolatedBondPromotion50(on: peripheral)\n\n        guard authenticated else {''',
+              'attempt bond only after direct widget delivery'
+          )
+
+          required = [
+              'CBConnectPeripheralOptionEnableAutoReconnect: true',
+              'registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])',
+              'publishReadingDirectlyToWidgets(reading)',
+              'WIDGET_WRITE seq=',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"',
+              'setNotifyValue(true',
+              'verifiedReadingPeripheralID50 == peripheral.identifier',
+              'Data([0x06, 0x19])',
+              'Data([0x07])',
+              'requires-jpake-cert-pop',
+              'value[1] == 0x01, value[2] == 0x02',
+              'valid0x4E autoreconnect=armed'
+          ]
+          for token in required:
+              if token not in m:
+                  raise RuntimeError(f'missing Build50 contract token: {token}')
+
+          # Build 50 must not manipulate the G7 whitelist/slots, disconnect the sensor, or
+          # synthesize J-PAKE/certificate/proof replies. Its only application-level TX bytes are
+          # the guarded documented 06 19 keepalive and 07 requestBond commands.
+          build50_start = m.find('// Build 50: isolated bond promotion')
+          build50_end = m.find('// Build 41: persistent BLE lifecycle trace', build50_start)
+          b50 = m[build50_start:build50_end]
+          for forbidden in ['Data([0xEA', 'Data([0x09', 'Data([0x0A', 'Data([0x0B', 'Data([0x0C']:
+              if forbidden in b50:
+                  raise RuntimeError(f'forbidden Build50 TX token: {forbidden}')
+
+          text = text[:a] + m + text[b:]
+          p.write_text(text, encoding='utf-8')
+          print('Build 50 isolated verified-peer bond promotion applied.')
+          PY
+
+      - name: Verify Build 50 contract
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build50-frozen.sha
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          m = s.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          for token in [
+              'CBConnectPeripheralOptionEnableAutoReconnect: true',
+              'connectVerifiedWithSystemAutoReconnect',
+              'registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])',
+              'publishReadingDirectlyToWidgets(reading)',
+              'WIDGET_WRITE seq=',
+              'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36',
+              'setNotifyValue(true',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"',
+              'verifiedReadingPeripheralID50 == peripheral.identifier',
+              'B50_BOND TX 0619 keepalive verified-peer',
+              'B50_BOND TX 07 requestBond verified-peer',
+              'B50_BOND blocked requires-jpake-cert-pop status=050102'
+          ]:
+              assert token in m, token
+          assert 'Timer.scheduledTimer' not in m
+          assert 'Thread.sleep' not in m
+          assert 'usleep(' not in m
+          print('Build 50 verified-peer bond contract verified; completed widgets remain frozen.')
+          PY
+          changed="$(git diff --name-only)"
+          test "$changed" = 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app and frozen WidgetKit extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build50-ipa && mkdir -p /tmp/xdrip-build50-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build50-ipa
+          APP="$(find /tmp/xdrip-build50-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
+          python3 - "$APP/Info.plist" "$WATCH_APP/Info.plist" <<'PY'
+          import plistlib, sys
+          expected = "Martin\u2018s xDrip"
+          with open(sys.argv[1], 'rb') as f: phone = plistlib.load(f)
+          with open(sys.argv[2], 'rb') as f: watch = plistlib.load(f)
+          assert phone.get('CFBundleDisplayName') == expected, phone.get('CFBundleDisplayName')
+          assert watch.get('CFBundleDisplayName') == expected, watch.get('CFBundleDisplayName')
+          print('Build50 packaged app names preserved:', expected)
+          PY
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 50 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build50-isolated-bond-promotion
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git commit -m 'Build 50: isolated verified G7 bond promotion'
+          git push origin HEAD:refs/heads/watch-build50-isolated-bond-promotion --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build50-isolated-bond-promotion-artifacts
+          path: |
+            artifacts
+            buildlog
