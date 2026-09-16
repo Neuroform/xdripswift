@@ -97,6 +97,17 @@ private struct G7DirectStatusView: View {
 
                 Divider()
 
+                Text("Build 51 BG-Quellenprotokoll")
+                    .font(.headline)
+                Text("Produktiver Datenpfad · keine Validierung starten. DIRECT_G7 = Sensor direkt; IPHONE_WC = WatchConnectivity vom iPhone. batch/new zeigt insbesondere nachgelieferte Messpunkte.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                row("Letzte Quelle", watchState.lastBgIngressSource51)
+                Text(watchState.bgIngressTrace51)
+                    .font(.system(size: 9, design: .monospaced))
+
+                Divider()
+
                 Text("Build 15 G7 Multi-Cycle-Validierung")
                     .font(.headline)
 

@@ -112,6 +112,10 @@ final class WatchStateModel: NSObject, ObservableObject {
     @Published var directG7LastSequence: UInt16?
     @Published var directG7ReadingCount: Int = 0
 
+    // Build 51: provenance only. This does not feed any widget and never changes BG selection.
+    @Published var bgIngressTrace51: String = "noch kein BG-Eingang protokolliert"
+    @Published var lastBgIngressSource51: String = "—"
+
     // Manual G7 authentication probe. This is intentionally opt-in and foreground-only.
     private var g7AuthProbeManager: G7AuthProbeManager?
     @Published var g7AuthProbeStatus: String = "bereit"
@@ -177,6 +181,7 @@ final class WatchStateModel: NSObject, ObservableObject {
                     self.directG7Status = status
                     self.directG7DeviceName = deviceName
                     self.directG7Authenticated = authenticated
+                    self.refreshBgIngressTrace51()
                 }
             },
             onReading: { [weak self] reading in
@@ -186,6 +191,7 @@ final class WatchStateModel: NSObject, ObservableObject {
             }
         )
         directG7Manager?.start()
+        refreshBgIngressTrace51()
     }
 
     // Build 45: watchOS Bluetooth-alert wake entry point. The existing Direct-G7 manager stays
@@ -194,6 +200,12 @@ final class WatchStateModel: NSObject, ObservableObject {
     @MainActor
     func handleDirectG7BluetoothAlert() {
         directG7Manager?.handleBluetoothAlertWake()
+    }
+
+    private func refreshBgIngressTrace51() {
+        let snapshot = bgIngressTraceSnapshot51()
+        lastBgIngressSource51 = snapshot.source
+        bgIngressTrace51 = snapshot.text
     }
 
     // MARK: - Functions to provide context data to populate the views
@@ -673,7 +685,7 @@ final class WatchStateModel: NSObject, ObservableObject {
 
     // MARK: - Private functions used to interact with the WCSession and prepare internal data
 
-    private func processWatchPayloadFromDictionary(dictionary: [String: Any]) {
+    private func processWatchPayloadFromDictionary(dictionary: [String: Any], route51: String) {
         var processedUpdate = false
 
         if let statusDictionary = dictionary["status"] as? [String: Any] {
@@ -681,7 +693,7 @@ final class WatchStateModel: NSObject, ObservableObject {
         }
 
         if let bgReadingsDictionary = dictionary["bgReadings"] as? [String: Any] {
-            processedUpdate = processBgReadingsFromDictionary(dictionary: bgReadingsDictionary) || processedUpdate
+            processedUpdate = processBgReadingsFromDictionary(dictionary: bgReadingsDictionary, route51: route51) || processedUpdate
         }
 
         if let agpDictionary = dictionary["agp"] as? [String: Any] {
@@ -695,7 +707,7 @@ final class WatchStateModel: NSObject, ObservableObject {
         }
     }
 
-    private func processBgReadingsFromDictionary(dictionary: [String: Any]) -> Bool {
+    private func processBgReadingsFromDictionary(dictionary: [String: Any], route51: String) -> Bool {
         let bgReadingDatesFromDictionary: [Double] = dictionary["bgReadingDatesAsDouble"] as? [Double] ?? []
 
         guard let incomingLatestTimestamp = bgReadingDatesFromDictionary.first else {
@@ -704,6 +716,7 @@ final class WatchStateModel: NSObject, ObservableObject {
 
         let incomingLatestDate = Date(timeIntervalSince1970: incomingLatestTimestamp)
         let incomingGeneratedAt = dictionary["generatedAt"] as? Double ?? incomingLatestTimestamp
+        let previousLatestDate51 = bgReadingDates.first
 
         // If the Watch has already received this same G7 sample directly, keep the direct state.
         // A genuinely newer iPhone sample still wins automatically, which preserves fallback.
@@ -736,6 +749,28 @@ final class WatchStateModel: NSObject, ObservableObject {
         deltaValueInUserUnit = dictionary["deltaValueInUserUnit"] as? Double ?? 0
         updatedDate = Date(timeIntervalSince1970: incomingGeneratedAt)
         bgDataSource = "iPhone"
+
+        let acceptedValues51 = dictionary["bgReadingValues"] as? [Double] ?? []
+        let newSampleCount51: Int
+        if let previousLatestDate51 {
+            newSampleCount51 = bgReadingDatesFromDictionary.reduce(into: 0) { count, timestamp in
+                if Date(timeIntervalSince1970: timestamp) > previousLatestDate51.addingTimeInterval(90) {
+                    count += 1
+                }
+            }
+        } else {
+            newSampleCount51 = bgReadingDatesFromDictionary.count
+        }
+        appendBgIngressTrace51(
+            source: "IPHONE_WC",
+            route: route51,
+            sampleDate: incomingLatestDate,
+            bg: acceptedValues51.first,
+            sequence: nil,
+            batchCount: bgReadingDatesFromDictionary.count,
+            newCount: newSampleCount51
+        )
+        refreshBgIngressTrace51()
 
         if let bgReadingDate = bgReadingDate() {
             lastUpdatedTextString = Texts_WatchApp.lastReading + " "
@@ -1988,6 +2023,65 @@ private struct DirectG7Reading {
     let algorithmStateRaw: UInt8
 }
 
+
+// Build 51: persistent BG provenance log. Diagnostic only; it never participates in glucose
+// selection, BLE connection control or WidgetKit rendering.
+private let bgIngressTraceKey51 = "xdrip.bgIngressTrace51"
+
+private func appendBgIngressTrace51(
+    source: String,
+    route: String,
+    sampleDate: Date,
+    bg: Double?,
+    sequence: UInt16?,
+    batchCount: Int,
+    newCount: Int
+) {
+    guard let defaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else { return }
+    var events = defaults.stringArray(forKey: bgIngressTraceKey51) ?? []
+    let bgField = bg.map { String(Int($0.rounded())) } ?? "-"
+    let seqField = sequence.map { String($0) } ?? "-"
+    let raw = [
+        String(Date().timeIntervalSince1970), source, route,
+        String(sampleDate.timeIntervalSince1970), bgField, seqField,
+        String(batchCount), String(newCount)
+    ].joined(separator: "|")
+    events.append(raw)
+    if events.count > 50 {
+        events.removeFirst(events.count - 50)
+    }
+    defaults.set(events, forKey: bgIngressTraceKey51)
+}
+
+private func bgIngressTraceSnapshot51() -> (source: String, text: String) {
+    guard let defaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else {
+        return ("—", "App Group nicht verfügbar")
+    }
+    let events = defaults.stringArray(forKey: bgIngressTraceKey51) ?? []
+    guard !events.isEmpty else {
+        return ("—", "noch kein BG-Eingang protokolliert")
+    }
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "de_AT")
+    formatter.dateFormat = "HH:mm:ss"
+
+    let lines = events.suffix(16).compactMap { raw -> String? in
+        let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 8,
+              let arrivalTS = Double(parts[0]),
+              let sampleTS = Double(parts[3]) else { return nil }
+        let arrival = formatter.string(from: Date(timeIntervalSince1970: arrivalTS))
+        let sample = formatter.string(from: Date(timeIntervalSince1970: sampleTS))
+        let seq = parts[5] == "-" ? "" : " seq=\(parts[5])"
+        return "\(arrival) \(parts[1])/\(parts[2]) BG=\(parts[4]) sample=\(sample)\(seq) batch=\(parts[6]) new=\(parts[7])"
+    }
+
+    let lastParts = events.last?.split(separator: "|", omittingEmptySubsequences: false).map(String.init) ?? []
+    let source = lastParts.count > 1 ? lastParts[1] : "—"
+    return (source, lines.joined(separator: "\n"))
+}
+
 private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private let advertisementUUID = CBUUID(string: "FEBC")
     private let serviceUUID = CBUUID(string: "F8083532-849E-531C-C594-30F1F86A4EA5")
@@ -2604,6 +2698,16 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             return
         }
 
+        appendBgIngressTrace51(
+            source: "DIRECT_G7",
+            route: "CORE_BLUETOOTH_0x4E",
+            sampleDate: reading.date,
+            bg: reading.glucoseMgDl,
+            sequence: reading.sequence,
+            batchCount: 1,
+            newCount: 1
+        )
+
         // Build 43/46: every valid sensor packet goes directly to the existing widgets.
         // A received 0x4E also proves that this is the correct live G7 connection, so any legacy
         // auth watchdog must remain cancelled and the GATT Notify subscription must stay intact.
@@ -2647,7 +2751,7 @@ extension WatchStateModel: WCSessionDelegate {
 
     func session(_: WCSession, didReceiveMessage message: [String: Any]) {
         DispatchQueue.main.async {
-            self.processWatchPayloadFromDictionary(dictionary: message)
+            self.processWatchPayloadFromDictionary(dictionary: message, route51: "MESSAGE")
             self.requestingDataIconColor = ConstantsAppleWatch.requestingDataIconColorActive
 
             // change the requesting icon color back after a small delay to prevent it
@@ -2660,13 +2764,13 @@ extension WatchStateModel: WCSessionDelegate {
 
     func session(_: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         DispatchQueue.main.async {
-            self.processWatchPayloadFromDictionary(dictionary: applicationContext)
+            self.processWatchPayloadFromDictionary(dictionary: applicationContext, route51: "APPLICATION_CONTEXT")
         }
     }
 
     func session(_: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
         DispatchQueue.main.async {
-            self.processWatchPayloadFromDictionary(dictionary: userInfo)
+            self.processWatchPayloadFromDictionary(dictionary: userInfo, route51: "USER_INFO")
         }
     }
 
