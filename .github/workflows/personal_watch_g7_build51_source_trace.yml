@@ -1,0 +1,339 @@
+name: Personal xDrip G7 Watch Build 51
+run-name: G7 Watch Build 51 BG Source Trace (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build51_source_trace.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 51
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout safe Build 49 baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build49-system-autoreconnect
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Freeze completed widgets naming and iPhone transport
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch App/xDripWatchApp.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist' \
+            'xDrip/xDrip.xcconfig' \
+            'xDrip/Supporting Files/Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build51-frozen.sha
+          done
+
+      - name: Apply Build 51 BG provenance trace
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('xDrip Watch App/DataModels/WatchStateModel.swift')
+          text = p.read_text(encoding='utf-8')
+
+          def rep(old, new, label):
+              global text
+              n = text.count(old)
+              if n != 1:
+                  raise RuntimeError(f'{label}: expected exactly one match, found {n}')
+              text = text.replace(old, new, 1)
+
+          # Add a persistent diagnostic view model value. It is read from the App Group, so a
+          # DIRECT_G7 event recorded while the UI is suspended is still visible when the app is
+          # opened later.
+          rep(
+              '    @Published var directG7ReadingCount: Int = 0\n',
+              '''    @Published var directG7ReadingCount: Int = 0\n\n    // Build 51: provenance only. This does not feed any widget and never changes BG selection.\n    @Published var bgIngressTrace51: String = "noch kein BG-Eingang protokolliert"\n    @Published var lastBgIngressSource51: String = "—"\n''',
+              'published source trace fields'
+          )
+
+          # Refresh provenance whenever the existing direct manager publishes state. The actual
+          # event is persisted synchronously by the CoreBluetooth callback below.
+          rep(
+              '''                    self.directG7Status = status\n                    self.directG7DeviceName = deviceName\n                    self.directG7Authenticated = authenticated\n''',
+              '''                    self.directG7Status = status\n                    self.directG7DeviceName = deviceName\n                    self.directG7Authenticated = authenticated\n                    self.refreshBgIngressTrace51()\n''',
+              'refresh trace on direct state'
+          )
+
+          # Load any events that arrived while the Watch UI was suspended.
+          rep(
+              '''        directG7Manager?.start()\n    }\n''',
+              '''        directG7Manager?.start()\n        refreshBgIngressTrace51()\n    }\n''',
+              'initial provenance refresh'
+          )
+
+          # Route labels distinguish immediate message, application-context and queued user-info
+          # WatchConnectivity deliveries. This is critical for identifying alarm-correlated batch
+          # delivery from the iPhone.
+          rep(
+              '    private func processWatchPayloadFromDictionary(dictionary: [String: Any]) {\n',
+              '    private func processWatchPayloadFromDictionary(dictionary: [String: Any], route51: String) {\n',
+              'payload route signature'
+          )
+          rep(
+              '            processedUpdate = processBgReadingsFromDictionary(dictionary: bgReadingsDictionary) || processedUpdate\n',
+              '            processedUpdate = processBgReadingsFromDictionary(dictionary: bgReadingsDictionary, route51: route51) || processedUpdate\n',
+              'route into BG parser'
+          )
+          rep(
+              '    private func processBgReadingsFromDictionary(dictionary: [String: Any]) -> Bool {\n',
+              '    private func processBgReadingsFromDictionary(dictionary: [String: Any], route51: String) -> Bool {\n',
+              'BG parser route signature'
+          )
+
+          # Capture the pre-update latest sample so we can explicitly report whether one, two or
+          # more new points were delivered in a single iPhone payload.
+          rep(
+              '''        let incomingLatestDate = Date(timeIntervalSince1970: incomingLatestTimestamp)\n        let incomingGeneratedAt = dictionary["generatedAt"] as? Double ?? incomingLatestTimestamp\n''',
+              '''        let incomingLatestDate = Date(timeIntervalSince1970: incomingLatestTimestamp)\n        let incomingGeneratedAt = dictionary["generatedAt"] as? Double ?? incomingLatestTimestamp\n        let previousLatestDate51 = bgReadingDates.first\n''',
+              'capture previous iPhone latest date'
+          )
+
+          # Log only an iPhone BG payload that actually wins the existing acceptance rules.
+          rep(
+              '''        bgDataSource = "iPhone"\n\n        if let bgReadingDate = bgReadingDate() {\n''',
+              '''        bgDataSource = "iPhone"\n\n        let acceptedValues51 = dictionary["bgReadingValues"] as? [Double] ?? []\n        let newSampleCount51: Int\n        if let previousLatestDate51 {\n            newSampleCount51 = bgReadingDatesFromDictionary.reduce(into: 0) { count, timestamp in\n                if Date(timeIntervalSince1970: timestamp) > previousLatestDate51.addingTimeInterval(90) {\n                    count += 1\n                }\n            }\n        } else {\n            newSampleCount51 = bgReadingDatesFromDictionary.count\n        }\n        appendBgIngressTrace51(\n            source: "IPHONE_WC",\n            route: route51,\n            sampleDate: incomingLatestDate,\n            bg: acceptedValues51.first,\n            sequence: nil,\n            batchCount: bgReadingDatesFromDictionary.count,\n            newCount: newSampleCount51\n        )\n        refreshBgIngressTrace51()\n\n        if let bgReadingDate = bgReadingDate() {\n''',
+              'log accepted iPhone BG payload'
+          )
+
+          # Give each WCSession callback an explicit transport label.
+          rep(
+              '            self.processWatchPayloadFromDictionary(dictionary: message)\n',
+              '            self.processWatchPayloadFromDictionary(dictionary: message, route51: "MESSAGE")\n',
+              'message route'
+          )
+          rep(
+              '            self.processWatchPayloadFromDictionary(dictionary: applicationContext)\n',
+              '            self.processWatchPayloadFromDictionary(dictionary: applicationContext, route51: "APPLICATION_CONTEXT")\n',
+              'application context route'
+          )
+          rep(
+              '            self.processWatchPayloadFromDictionary(dictionary: userInfo)\n',
+              '            self.processWatchPayloadFromDictionary(dictionary: userInfo, route51: "USER_INFO")\n',
+              'user info route'
+          )
+
+          # Shared provenance helpers are file-level so both WatchStateModel and the productive
+          # G7DirectBLEManager can append to exactly the same App Group log.
+          anchor = '''private struct DirectG7Reading {\n    let glucoseMgDl: Double\n    let date: Date\n    let trendMgDlPerMinute: Double?\n    let sequence: UInt16\n    let sensorAgeSeconds: TimeInterval\n    let algorithmStateRaw: UInt8\n}\n'''
+          if text.count(anchor) != 1:
+              raise RuntimeError('DirectG7Reading anchor mismatch')
+          helper = anchor + r'''
+
+// Build 51: persistent BG provenance log. Diagnostic only; it never participates in glucose
+// selection, BLE connection control or WidgetKit rendering.
+private let bgIngressTraceKey51 = "xdrip.bgIngressTrace51"
+
+private func appendBgIngressTrace51(
+    source: String,
+    route: String,
+    sampleDate: Date,
+    bg: Double?,
+    sequence: UInt16?,
+    batchCount: Int,
+    newCount: Int
+) {
+    guard let defaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else { return }
+    var events = defaults.stringArray(forKey: bgIngressTraceKey51) ?? []
+    let bgField = bg.map { String(Int($0.rounded())) } ?? "-"
+    let seqField = sequence.map { String($0) } ?? "-"
+    let raw = [
+        String(Date().timeIntervalSince1970), source, route,
+        String(sampleDate.timeIntervalSince1970), bgField, seqField,
+        String(batchCount), String(newCount)
+    ].joined(separator: "|")
+    events.append(raw)
+    if events.count > 50 { events.removeFirst(events.count - 50) }
+    defaults.set(events, forKey: bgIngressTraceKey51)
+}
+
+private func bgIngressTraceSnapshot51() -> (source: String, text: String) {
+    guard let defaults = UserDefaults(suiteName: Bundle.main.appGroupSuiteName) else {
+        return ("—", "App Group nicht verfügbar")
+    }
+    let events = defaults.stringArray(forKey: bgIngressTraceKey51) ?? []
+    guard !events.isEmpty else { return ("—", "noch kein BG-Eingang protokolliert") }
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "de_AT")
+    formatter.dateFormat = "HH:mm:ss"
+
+    let lines = events.suffix(16).compactMap { raw -> String? in
+        let p = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard p.count == 8,
+              let arrivalTS = Double(p[0]),
+              let sampleTS = Double(p[3]) else { return nil }
+        let arrival = formatter.string(from: Date(timeIntervalSince1970: arrivalTS))
+        let sample = formatter.string(from: Date(timeIntervalSince1970: sampleTS))
+        let seq = p[5] == "-" ? "" : " seq=\(p[5])"
+        return "\(arrival) \(p[1])/\(p[2]) BG=\(p[4]) sample=\(sample)\(seq) batch=\(p[6]) new=\(p[7])"
+    }
+    let source = events.last?.split(separator: "|", omittingEmptySubsequences: false).dropFirst().first.map(String.init) ?? "—"
+    return (source, lines.joined(separator: "\n"))
+}
+'''
+          text = text.replace(anchor, helper, 1)
+
+          # WatchStateModel can render the persisted trace without touching any widget.
+          marker = '    // MARK: - Functions to provide context data to populate the views\n'
+          if text.count(marker) != 1:
+              raise RuntimeError('WatchStateModel helper marker mismatch')
+          model_helper = r'''    private func refreshBgIngressTrace51() {
+        let snapshot = bgIngressTraceSnapshot51()
+        lastBgIngressSource51 = snapshot.source
+        bgIngressTrace51 = snapshot.text
+    }
+
+'''
+          text = text.replace(marker, model_helper + marker, 1)
+
+          # The productive direct callback records provenance immediately after a valid 0x4E was
+          # parsed and before WidgetKit state is written. This survives UI suspension.
+          direct_anchor = '''        guard let reading = parseG7Glucose(value) else {\n            publish("0x4E empfangen; Parser abgelehnt")\n            return\n        }\n\n        // Build 43/46: every valid sensor packet goes directly to the existing widgets.\n'''
+          direct_replacement = '''        guard let reading = parseG7Glucose(value) else {\n            publish("0x4E empfangen; Parser abgelehnt")\n            return\n        }\n\n        appendBgIngressTrace51(\n            source: "DIRECT_G7",\n            route: "CORE_BLUETOOTH_0x4E",\n            sampleDate: reading.date,\n            bg: reading.glucoseMgDl,\n            sequence: reading.sequence,\n            batchCount: 1,\n            newCount: 1\n        )\n\n        // Build 43/46: every valid sensor packet goes directly to the existing widgets.\n'''
+          if text.count(direct_anchor) != 1:
+              raise RuntimeError(f'direct provenance anchor expected once, found {text.count(direct_anchor)}')
+          text = text.replace(direct_anchor, direct_replacement, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+          # Add a small diagnostics section to the existing G7 Direct page. This is Watch-app UI
+          # only; the graph and all complication views/providers remain byte-for-byte unchanged.
+          r = Path('xDrip Watch App/Views/RootView.swift')
+          root = r.read_text(encoding='utf-8')
+          old = '''                row("Direct-Werte", "\\(watchState.directG7ReadingCount)")\n\n                Divider()\n\n                Text("Build 15 G7 Multi-Cycle-Validierung")\n'''
+          new = '''                row("Direct-Werte", "\\(watchState.directG7ReadingCount)")\n\n                Divider()\n\n                Text("Build 51 BG-Quellenprotokoll")\n                    .font(.headline)\n                Text("Produktiver Datenpfad · keine Validierung starten. DIRECT_G7 = Sensor direkt; IPHONE_WC = WatchConnectivity vom iPhone. batch/new zeigt insbesondere nachgelieferte Messpunkte.")\n                    .font(.caption2)\n                    .foregroundStyle(.secondary)\n                row("Letzte Quelle", watchState.lastBgIngressSource51)\n                Text(watchState.bgIngressTrace51)\n                    .font(.system(size: 9, design: .monospaced))\n\n                Divider()\n\n                Text("Build 15 G7 Multi-Cycle-Validierung")\n'''
+          if root.count(old) != 1:
+              raise RuntimeError(f'RootView source trace anchor expected once, found {root.count(old)}')
+          root = root.replace(old, new, 1)
+          r.write_text(root, encoding='utf-8')
+          print('Build 51 BG source trace patch applied.')
+          PY
+
+      - name: Verify Build 51 contract and safety
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build51-frozen.sha
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          r = Path('xDrip Watch App/Views/RootView.swift').read_text(encoding='utf-8')
+          for token in [
+              'DIRECT_G7', 'IPHONE_WC', 'CORE_BLUETOOTH_0x4E',
+              'APPLICATION_CONTEXT', 'USER_INFO', 'MESSAGE',
+              'bgIngressTraceKey51', 'batchCount:', 'newCount:',
+              'publishReadingDirectlyToWidgets(reading)',
+              'CBConnectPeripheralOptionEnableAutoReconnect: true',
+              'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36'
+          ]:
+              assert token in s, token
+          assert 'Build 51 BG-Quellenprotokoll' in r
+          # Build 51 intentionally returns to the safe Build 49 listener baseline. It must not
+          # contain Build 50 bond promotion or G7 protocol writes.
+          m = s.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          assert 'B50_BOND' not in m
+          assert 'writeValue(Data([0x06' not in m
+          assert 'writeValue(Data([0x07' not in m
+          print('Build 51 provenance + Dexcom isolation contract verified.')
+          PY
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' 'xDrip Watch App/DataModels/WatchStateModel.swift' 'xDrip Watch App/Views/RootView.swift' | sort)"
+          test "$changed" = "$expected"
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app extension and preserved name
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build51-ipa && mkdir -p /tmp/xdrip-build51-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build51-ipa
+          APP="$(find /tmp/xdrip-build51-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
+          python3 - "$APP/Info.plist" "$WATCH_APP/Info.plist" <<'PY'
+          import plistlib, sys
+          expected = "Martin\u2018s xDrip"
+          with open(sys.argv[1], 'rb') as f: phone = plistlib.load(f)
+          with open(sys.argv[2], 'rb') as f: watch = plistlib.load(f)
+          assert phone.get('CFBundleDisplayName') == expected, phone.get('CFBundleDisplayName')
+          assert watch.get('CFBundleDisplayName') == expected, watch.get('CFBundleDisplayName')
+          print('Build51 packaged app names preserved:', expected)
+          PY
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 51 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build51-bg-source-trace
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift' 'xDrip Watch App/Views/RootView.swift'
+          git commit -m 'Build 51: trace BG provenance across direct G7 and iPhone WC'
+          git push origin HEAD:refs/heads/watch-build51-bg-source-trace --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build51-source-trace-artifacts
+          path: |
+            artifacts
+            buildlog
