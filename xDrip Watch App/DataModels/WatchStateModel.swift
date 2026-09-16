@@ -2007,6 +2007,83 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var lastDeviceName = ""
     private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"
 
+    // Build 50: isolated bond promotion is allowed only on the exact CBPeripheral that has
+    // produced a valid parsed 0x4E glucose packet during this connection. The official Dexcom
+    // peer is never selected, modified, removed or whitelisted by this path.
+    private var verifiedReadingPeripheralID50: UUID?
+    private var authCharacteristic50: CBCharacteristic?
+    private var lastAuthAuthenticatedByte50: UInt8?
+    private var lastAuthBondState50: UInt8?
+    private var keepAliveSent50 = false
+    private var bondRequestSent50 = false
+
+    private func resetBondPromotionState50() {
+        verifiedReadingPeripheralID50 = nil
+        authCharacteristic50 = nil
+        lastAuthAuthenticatedByte50 = nil
+        lastAuthBondState50 = nil
+        keepAliveSent50 = false
+        bondRequestSent50 = false
+    }
+
+    private func authWriteType50(for characteristic: CBCharacteristic) -> CBCharacteristicWriteType? {
+        if characteristic.properties.contains(.write) { return .withResponse }
+        if characteristic.properties.contains(.writeWithoutResponse) { return .withoutResponse }
+        return nil
+    }
+
+    private func attemptIsolatedBondPromotion50(on peripheral: CBPeripheral) {
+        guard verifiedReadingPeripheralID50 == peripheral.identifier,
+              isVerifiedPeripheral(peripheral),
+              lastAuthAuthenticatedByte50 == 0x01 else {
+            trace41("B50_BOND blocked unverified-or-unauthenticated id=\(peripheral.identifier.uuidString)")
+            return
+        }
+
+        // G7 status 05 01 02 is the new-pairing state. It requires the complete J-PAKE,
+        // certificate exchange and proof-of-possession sequence before 0x06/0x07. Build 50
+        // deliberately does not fake or skip those cryptographic phases.
+        if lastAuthBondState50 == 0x02 {
+            trace41("B50_BOND blocked requires-jpake-cert-pop status=050102")
+            publish("Build50: G7 verlangt J-PAKE/Certificate/PoP; Bond-TX sicher blockiert")
+            return
+        }
+
+        // Status 05 01 01 is the normal authenticated/bond-capable state. Only here do we
+        // issue the documented keep-alive. requestBond follows only after the sensor ACKs 06 00.
+        guard lastAuthBondState50 == 0x01 else {
+            trace41("B50_BOND blocked unknown-bond-state=\(lastAuthBondState50.map(String.init) ?? "nil")")
+            return
+        }
+        guard !keepAliveSent50,
+              let characteristic = authCharacteristic50,
+              let writeType = authWriteType50(for: characteristic) else { return }
+
+        keepAliveSent50 = true
+        peripheral.writeValue(Data([0x06, 0x19]), for: characteristic, type: writeType)
+        trace41("B50_BOND TX 0619 keepalive verified-peer")
+        publish("Build50: verifizierter xDrip-G7-Peer · KeepAlive gesendet")
+    }
+
+    private func sendBondRequestAfterKeepAliveACK50(on peripheral: CBPeripheral) {
+        guard verifiedReadingPeripheralID50 == peripheral.identifier,
+              isVerifiedPeripheral(peripheral),
+              lastAuthAuthenticatedByte50 == 0x01,
+              lastAuthBondState50 == 0x01,
+              keepAliveSent50,
+              !bondRequestSent50,
+              let characteristic = authCharacteristic50,
+              let writeType = authWriteType50(for: characteristic) else {
+            trace41("B50_BOND request blocked guard")
+            return
+        }
+
+        bondRequestSent50 = true
+        peripheral.writeValue(Data([0x07]), for: characteristic, type: writeType)
+        trace41("B50_BOND TX 07 requestBond verified-peer")
+        publish("Build50: Bond-Anfrage ausschließlich an verifizierten xDrip-Peer gesendet")
+    }
+
     // Build 49: Heart-rate-monitor-style connection ownership. Once a real 0x4E packet has
     // verified the G7 peripheral, CoreBluetooth itself owns reconnects between the sensor's
     // short five-minute radio windows. No Timer, delayed DispatchQueue retry or foreground UI
@@ -2408,6 +2485,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         trace41("CONNECTED \(peripheral.name ?? "unknown") verified=\(isVerifiedPeripheral(peripheral))")
         targetPeripheral = peripheral
         peripheral.delegate = self
+        resetBondPromotionState50()
         lastDeviceName = peripheral.name ?? lastDeviceName
         if isVerifiedPeripheral(peripheral) {
             registerVerifiedConnectionEvents(peripheral.identifier)
@@ -2544,6 +2622,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             return
         }
 
+        authCharacteristic50 = (service.characteristics ?? []).first(where: { $0.uuid == authUUID })
+
         let notifyCharacteristics = (service.characteristics ?? []).filter {
             $0.properties.contains(.notify) || $0.properties.contains(.indicate)
         }
@@ -2571,23 +2651,58 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard error == nil, let value = characteristic.value, !value.isEmpty else { return }
 
-        if characteristic.uuid == authUUID, value.count >= 3, value[0] == 0x05 {
-            authenticated = value[1] == 0x01 && value[2] != 0x02
+        if characteristic.uuid == authUUID {
+            if value.count >= 3, value[0] == 0x05 {
+                lastAuthAuthenticatedByte50 = value[1]
+                lastAuthBondState50 = value[2]
+                authenticated = value[1] == 0x01 && value[2] != 0x02
+                trace41(String(format: "B50_AUTH status=%02X%02X%02X", value[0], value[1], value[2]))
 
-            if authenticated {
-                authTimeoutTask?.cancel()
-                authTimeoutTask = nil
-                publish("Dexcom-authentifiziert · Direct aktiv")
+                if value[1] == 0x01, value[2] == 0x02 {
+                    trace41("B50_BOND blocked requires-jpake-cert-pop status=050102")
+                    publish("Build50: Auth erkannt, vollständiges G7-Pairing erforderlich · keine Bond-TX")
+                } else if authenticated {
+                    authTimeoutTask?.cancel()
+                    authTimeoutTask = nil
+                    publish("Dexcom-authentifiziert · Direct aktiv · Build50 Bond-Guard bereit")
+                    attemptIsolatedBondPromotion50(on: peripheral)
 
-                if let pendingGlucosePacket,
-                   let reading = parseG7Glucose(pendingGlucosePacket) {
-                    self.pendingGlucosePacket = nil
-                    onReading(reading)
+                    if let pendingGlucosePacket,
+                       let reading = parseG7Glucose(pendingGlucosePacket) {
+                        self.pendingGlucosePacket = nil
+                        onReading(reading)
+                    }
+                } else {
+                    publish("Dexcom-Auth nicht freigegeben")
                 }
-            } else {
-                publish("Dexcom-Auth nicht freigegeben")
+                return
             }
-            return
+
+            if value.count >= 2, value[0] == 0x06 {
+                trace41(String(format: "B50_BOND RX keepalive=%02X", value[1]))
+                if value[1] == 0x00 {
+                    sendBondRequestAfterKeepAliveACK50(on: peripheral)
+                }
+                return
+            }
+
+            if value.count >= 2, value[0] == 0x07 {
+                trace41(String(format: "B50_BOND RX requestBondAck=%02X", value[1]))
+                return
+            }
+
+            if value.count >= 2, value[0] == 0x08 {
+                trace41(String(format: "B50_BOND RX bondComplete=%02X", value[1]))
+                if value[1] == 0x01 {
+                    publish("Build50: xDrip-G7 Bond bestätigt")
+                }
+                return
+            }
+
+            if let opcode = value.first, opcode == 0x0A || opcode == 0x0B || opcode == 0x0C {
+                trace41(String(format: "B50_BOND cryptographic-phase RX opcode=%02X; no synthetic reply", opcode))
+                return
+            }
         }
 
         guard characteristic.uuid == controlUUID, value[0] == 0x4E else { return }
@@ -2595,14 +2710,18 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         let seq41 = value.count >= 8 ? littleEndianUInt16(value, offset: 6) : 0
         let bg41 = value.count >= 14 ? Int(littleEndianUInt16(value, offset: 12) & 0x0FFF) : -1
         trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
-        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)
-        registerVerifiedConnectionEvents(peripheral.identifier)
-        trace41("VERIFIED_SOURCE id=\(peripheral.identifier.uuidString) autoreconnect=armed")
 
         guard let reading = parseG7Glucose(value) else {
             publish("0x4E empfangen; Parser abgelehnt")
             return
         }
+
+        // Build 50 tightens the identity proof: persistence and any bond action happen only
+        // after parseG7Glucose accepted the 0x4E packet, never merely from an opcode match.
+        verifiedReadingPeripheralID50 = peripheral.identifier
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)
+        registerVerifiedConnectionEvents(peripheral.identifier)
+        trace41("VERIFIED_SOURCE id=\(peripheral.identifier.uuidString) valid0x4E autoreconnect=armed")
 
         // Build 43/46: every valid sensor packet goes directly to the existing widgets.
         // A received 0x4E also proves that this is the correct live G7 connection, so any legacy
@@ -2610,6 +2729,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         authTimeoutTask?.cancel()
         authTimeoutTask = nil
         publishReadingDirectlyToWidgets(reading)
+        // Widget delivery remains first. Bond promotion is strictly secondary and guarded.
+        attemptIsolatedBondPromotion50(on: peripheral)
 
         guard authenticated else {
             pendingGlucosePacket = value
