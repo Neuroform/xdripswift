@@ -2112,6 +2112,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var lastLiveSequence52: UInt16?
     private var sensorActivationDate52: Date?
     private var backfillBuffer52: [DirectG7BackfillReading] = []
+    private var deferredBackfillFrames53: [Data] = []
+    private var deferredBackfillFinished53 = false
     private let verifiedPeripheralIDKey = "xdrip.g7Direct.verifiedPeripheralID.build47"
 
     // Build 49: Heart-rate-monitor-style connection ownership. Once a real 0x4E packet has
@@ -2137,10 +2139,26 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         peripheral.delegate = self
         registerVerifiedConnectionEvents(peripheral.identifier)
         trace41("AUTO_CONNECT request reason=\(reason) state=\(peripheral.state.rawValue)")
-        central.connect(
-            peripheral,
-            options: [CBConnectPeripheralOptionEnableAutoReconnect: true]
-        )
+
+        switch peripheral.state {
+        case .connected:
+            if central.isScanning { central.stopScan() }
+            peripheral.discoverServices([serviceUUID])
+        case .connecting:
+            // Do not issue a second connect request. Keep the FEBC scan registered so the
+            // next sensor advertisement remains a system wake source while CoreBluetooth owns
+            // the pending connection.
+            startGapRecoveryScan52(reason: "already-connecting-\(reason)")
+        case .disconnected:
+            central.connect(
+                peripheral,
+                options: [CBConnectPeripheralOptionEnableAutoReconnect: true]
+            )
+        case .disconnecting:
+            startGapRecoveryScan52(reason: "disconnecting-\(reason)")
+        @unknown default:
+            startGapRecoveryScan52(reason: "unknown-state-\(reason)")
+        }
     }
 
     // Build 41: persistent BLE lifecycle trace. This deliberately lives inside the existing
@@ -2228,7 +2246,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private func inspect(_ peripheral: CBPeripheral) {
         guard enabled, targetPeripheral == nil else { return }
 
-        central.stopScan()
+        let verified = isVerifiedPeripheral(peripheral)
+        // For an already verified xDrip peer, do not tear down the filtered FEBC scan while
+        // waiting for the short G7 radio window. The scan itself is the background wake source.
+        if !verified { central.stopScan() }
+
         targetPeripheral = peripheral
         peripheral.delegate = self
         lastDeviceName = peripheral.name ?? "unbekannt"
@@ -2236,13 +2258,15 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         pendingGlucosePacket = nil
         trace41("DISCOVER \(lastDeviceName) state=\(peripheral.state.rawValue)")
         if peripheral.state == .connected {
+            if central.isScanning { central.stopScan() }
             publish("G7 verbunden; registriere Notify erneut…")
-            if isVerifiedPeripheral(peripheral) {
+            if verified {
                 registerVerifiedConnectionEvents(peripheral.identifier)
             }
             peripheral.discoverServices([serviceUUID])
-        } else if isVerifiedPeripheral(peripheral) {
-            publish("Verifiziertes G7 gefunden; System-AutoReconnect…")
+        } else if verified {
+            publish("Verifiziertes G7 gefunden; FEBC-Wake + System-AutoReconnect…")
+            startGapRecoveryScan52(reason: "inspect-known-immediate")
             connectVerifiedWithSystemAutoReconnect(peripheral, reason: "inspect-known")
         } else {
             publish("G7 gefunden; verbinde zur Verifizierung…")
@@ -2306,15 +2330,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     }
 
     private func scheduleGapRecoveryScan52(reason: String) {
-        // Match the proven G7SensorKit reconnect pattern: hold the BLE callback context for
-        // two seconds so the sensor can finish shutting down, then scan for the next FEBC
-        // advertisement. The actual CBCentralManager still runs on the main queue.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            Thread.sleep(forTimeInterval: 2.0)
-            DispatchQueue.main.async {
-                self?.startGapRecoveryScan52(reason: reason)
-            }
-        }
+        // Build 53: register the next FEBC advertisement synchronously while this BLE callback
+        // still owns background execution time. A delayed DispatchQueue/Thread.sleep can be
+        // suspended before scan registration and was observed to miss six consecutive cycles.
+        startGapRecoveryScan52(reason: "immediate-\(reason)")
+        trace41("GAP_RECOVERY_ARMED_IMMEDIATE reason=\(reason)")
     }
 
     private func parseBackfill52(_ data: Data) -> DirectG7BackfillReading? {
@@ -2602,6 +2622,9 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         switch central.state {
         case .poweredOn:
             publish("Bluetooth ein")
+            if verifiedPeripheralID() != nil {
+                startGapRecoveryScan52(reason: "central-powered-on")
+            }
             beginDiscovery()
         case .poweredOff:
             publish("Bluetooth aus")
@@ -2643,6 +2666,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             if peripheral.state == .connected {
                 peripheral.discoverServices([serviceUUID])
             } else if isVerifiedPeripheral(peripheral) {
+                startGapRecoveryScan52(reason: "state-restoration-immediate")
                 connectVerifiedWithSystemAutoReconnect(peripheral, reason: "state-restoration")
             } else {
                 central.connect(peripheral, options: nil)
@@ -2711,9 +2735,12 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
 
         if isVerifiedPeripheral(peripheral) {
             targetPeripheral = peripheral
-            publish("Verifiziertes G7 noch nicht erreichbar; System-Verbindung bleibt registriert")
-            if central.state == .poweredOn, peripheral.state == .disconnected {
-                connectVerifiedWithSystemAutoReconnect(peripheral, reason: "connect-failed")
+            publish("Verifiziertes G7 noch nicht erreichbar; FEBC-Wake bleibt registriert")
+            if central.state == .poweredOn {
+                startGapRecoveryScan52(reason: "connect-failed-immediate")
+                if peripheral.state == .disconnected {
+                    connectVerifiedWithSystemAutoReconnect(peripheral, reason: "connect-failed")
+                }
             }
             return
         }
@@ -2810,7 +2837,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             label = "unknown"
         }
         trace41("CONNECTION_EVENT \(label) state=\(peripheral.state.rawValue)")
-        if event == .peerConnected, peripheral.state == .connected {
+        if event == .peerDisconnected {
+            // Earliest possible background callback: arm the next FEBC wake before any later
+            // disconnect delegate or suspension can occur.
+            startGapRecoveryScan52(reason: "connection-event-peerDisconnected")
+        } else if event == .peerConnected, peripheral.state == .connected {
             if central.isScanning { central.stopScan() }
             peripheral.discoverServices([serviceUUID])
         }
@@ -2868,6 +2899,14 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         guard error == nil, let value = characteristic.value, !value.isEmpty else { return }
 
         if characteristic.uuid == backfillUUID {
+            if sensorActivationDate52 == nil, value.count == 9 {
+                deferredBackfillFrames53.append(value)
+                if deferredBackfillFrames53.count > 64 {
+                    deferredBackfillFrames53.removeFirst(deferredBackfillFrames53.count - 64)
+                }
+                trace41("BACKFILL_DEFERRED len=9 count=\(deferredBackfillFrames53.count)")
+                return
+            }
             if let reading = parseBackfill52(value) {
                 if !backfillBuffer52.contains(where: { abs($0.date.timeIntervalSince(reading.date)) < 30 }) {
                     backfillBuffer52.append(reading)
@@ -2880,8 +2919,13 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         }
 
         if characteristic.uuid == controlUUID, value[0] == 0x59 {
-            trace41("BACKFILL_FINISHED count=\(backfillBuffer52.count)")
-            flushBackfill52(reason: "0x59-finished")
+            if sensorActivationDate52 == nil, !deferredBackfillFrames53.isEmpty {
+                deferredBackfillFinished53 = true
+                trace41("BACKFILL_FINISHED deferred count=\(deferredBackfillFrames53.count)")
+            } else {
+                trace41("BACKFILL_FINISHED count=\(backfillBuffer52.count)")
+                flushBackfill52(reason: "0x59-finished")
+            }
             return
         }
 
@@ -2912,6 +2956,22 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             let messageTimestamp52 = littleEndianUInt32(value, offset: 2)
             let messageAge52 = TimeInterval(value[10])
             sensorActivationDate52 = Date().addingTimeInterval(-TimeInterval(messageTimestamp52) - messageAge52)
+
+            if !deferredBackfillFrames53.isEmpty {
+                let deferred = deferredBackfillFrames53
+                deferredBackfillFrames53.removeAll(keepingCapacity: true)
+                for frame in deferred {
+                    if let backfill = parseBackfill52(frame),
+                       !backfillBuffer52.contains(where: { abs($0.date.timeIntervalSince(backfill.date)) < 30 }) {
+                        backfillBuffer52.append(backfill)
+                    }
+                }
+                trace41("BACKFILL_DEFERRED_DECODED count=\(backfillBuffer52.count)")
+                if deferredBackfillFinished53 {
+                    deferredBackfillFinished53 = false
+                    flushBackfill52(reason: "deferred-0x59-after-live")
+                }
+            }
         }
         trace41("RX4E seq=\(seq41) bg=\(bg41) auth=\(authenticated)")
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: verifiedPeripheralIDKey)
