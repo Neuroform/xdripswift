@@ -2099,6 +2099,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private let onState: (String, String, Bool) -> Void
     private let onReading: (DirectG7Reading) -> Void
 
+    private let centralQueue54 = DispatchQueue(label: "xDrip.G7.Direct.bt.central", qos: .userInitiated)
     private var central: CBCentralManager!
     private var targetPeripheral: CBPeripheral?
     private var enabled = false
@@ -2109,6 +2110,9 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private var lastDeviceName = ""
 
     // Build 52: sequence continuity + passive Dexcom backfill.
+    private var connectPending54 = false
+    private var controlCharacteristic54: CBCharacteristic?
+    private var backfillRequestInFlight54 = false
     private var lastLiveSequence52: UInt16?
     private var sensorActivationDate52: Date?
     private var backfillBuffer52: [DirectG7BackfillReading] = []
@@ -2130,34 +2134,45 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     }
 
     private func registerVerifiedConnectionEvents(_ identifier: UUID) {
-        central.registerForConnectionEvents(options: [.peripheralUUIDs: [identifier]])
-        trace41("CONNECTION_EVENTS registered id=\(identifier.uuidString)")
+        // Build 54: deliberately no registerForConnectionEvents here. The verified G7 uses one
+        // OS-level pending connect. A service-filtered scan is only a first-discovery/fallback path.
+        trace41("CONNECTION_EVENTS54 disabled id=\(identifier.uuidString)")
     }
 
     private func connectVerifiedWithSystemAutoReconnect(_ peripheral: CBPeripheral, reason: String) {
-        targetPeripheral = peripheral
-        peripheral.delegate = self
-        registerVerifiedConnectionEvents(peripheral.identifier)
-        trace41("AUTO_CONNECT request reason=\(reason) state=\(peripheral.state.rawValue)")
+        guard enabled, central.state == .poweredOn else { return }
 
-        switch peripheral.state {
+        let known: CBPeripheral
+        if let id = verifiedPeripheralID(),
+           let refreshed = central.retrievePeripherals(withIdentifiers: [id]).first {
+            known = refreshed
+        } else {
+            known = peripheral
+        }
+
+        targetPeripheral = known
+        known.delegate = self
+        if central.isScanning { central.stopScan() }
+
+        trace41("KNOWN_PEER_ARMED54 reason=\(reason) state=\(known.state.rawValue) id=\(known.identifier.uuidString)")
+
+        switch known.state {
         case .connected:
-            if central.isScanning { central.stopScan() }
-            peripheral.discoverServices([serviceUUID])
+            connectPending54 = false
+            known.discoverServices([serviceUUID])
         case .connecting:
-            // Do not issue a second connect request. Keep the FEBC scan registered so the
-            // next sensor advertisement remains a system wake source while CoreBluetooth owns
-            // the pending connection.
-            startGapRecoveryScan52(reason: "already-connecting-\(reason)")
+            connectPending54 = true
         case .disconnected:
-            central.connect(
-                peripheral,
-                options: [CBConnectPeripheralOptionEnableAutoReconnect: true]
-            )
+            guard !connectPending54 else {
+                trace41("KNOWN_PEER_CONNECT54 already-pending reason=\(reason)")
+                return
+            }
+            connectPending54 = true
+            central.connect(known, options: nil)
         case .disconnecting:
-            startGapRecoveryScan52(reason: "disconnecting-\(reason)")
+            break
         @unknown default:
-            startGapRecoveryScan52(reason: "unknown-state-\(reason)")
+            break
         }
     }
 
@@ -2199,7 +2214,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
 
         central = CBCentralManager(
             delegate: self,
-            queue: .main,
+            queue: centralQueue54,
             options: [CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"]
         )
     }
@@ -2316,25 +2331,29 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     private func startGapRecoveryScan52(reason: String) {
         guard enabled, central.state == .poweredOn else { return }
 
-        if let id = verifiedPeripheralID() {
-            registerVerifiedConnectionEvents(id)
+        if let id = verifiedPeripheralID(),
+           let known = central.retrievePeripherals(withIdentifiers: [id]).first {
+            // Build 54: normal G7 duty-cycle recovery is a pending connection to the known peer,
+            // not an advertisement scan racing a second connection mechanism.
+            connectVerifiedWithSystemAutoReconnect(known, reason: "known-peer-\(reason)")
+            return
         }
 
+        // Only if there is no retrievable verified peer do we fall back to FEBC discovery.
+        targetPeripheral = nil
+        connectPending54 = false
         if !central.isScanning {
             central.scanForPeripherals(
                 withServices: [advertisementUUID],
                 options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
             )
         }
-        trace41("GAP_RECOVERY_SCAN begin reason=\(reason)")
+        trace41("FALLBACK_SCAN54 begin reason=\(reason)")
     }
 
     private func scheduleGapRecoveryScan52(reason: String) {
-        // Build 53: register the next FEBC advertisement synchronously while this BLE callback
-        // still owns background execution time. A delayed DispatchQueue/Thread.sleep can be
-        // suspended before scan registration and was observed to miss six consecutive cycles.
         startGapRecoveryScan52(reason: "immediate-\(reason)")
-        trace41("GAP_RECOVERY_ARMED_IMMEDIATE reason=\(reason)")
+        trace41("KNOWN_PEER_RECOVERY54 reason=\(reason)")
     }
 
     private func parseBackfill52(_ data: Data) -> DirectG7BackfillReading? {
@@ -2716,6 +2735,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        connectPending54 = false
         if central.isScanning { central.stopScan() }
         trace41("CONNECTED \(peripheral.name ?? "unknown") verified=\(isVerifiedPeripheral(peripheral))")
         targetPeripheral = peripheral
@@ -2730,6 +2750,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        connectPending54 = false
+        backfillRequestInFlight54 = false
         trace41("CONNECT_FAIL err=\(error?.localizedDescription ?? "nil") verified=\(isVerifiedPeripheral(peripheral))")
         authenticated = false
 
@@ -2752,9 +2774,11 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         scheduleReconnect()
     }
 
-    // Legacy disconnect callback remains as a fallback. Verified G7 links are immediately
-    // re-registered with CoreBluetooth AutoReconnect rather than returning to scanning.
+    // Legacy disconnect callback remains as a fallback and feeds the same Build54 known-peer path.
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        connectPending54 = false
+        backfillRequestInFlight54 = false
+        controlCharacteristic54 = nil
         trace41("DISCONNECT_LEGACY err=\(error?.localizedDescription ?? "nil") state=\(peripheral.state.rawValue)")
         guard targetPeripheral?.identifier == peripheral.identifier else { return }
 
@@ -2780,9 +2804,8 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         scheduleReconnect()
     }
 
-    // watchOS 10+ CoreBluetooth callback used by CBConnectPeripheralOptionEnableAutoReconnect.
-    // If isReconnecting is true the operating system already owns the pending reconnect; do not
-    // scan, sleep, schedule a timer or issue a competing connection request.
+    // watchOS 10+ disconnect callback. Build54 uses the same single-known-peer recovery path
+    // regardless of which disconnect overload watchOS delivers.
     @available(watchOS 10.0, *)
     func centralManager(
         _ central: CBCentralManager,
@@ -2791,6 +2814,9 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         isReconnecting: Bool,
         error: Error?
     ) {
+        connectPending54 = false
+        backfillRequestInFlight54 = false
+        controlCharacteristic54 = nil
         trace41("DISCONNECT_AUTO reconnecting=\(isReconnecting) err=\(error?.localizedDescription ?? "nil")")
         guard targetPeripheral?.identifier == peripheral.identifier else { return }
 
@@ -2871,7 +2897,9 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
             return
         }
 
-        let notifyCharacteristics = (service.characteristics ?? []).filter {
+        let allCharacteristics54 = service.characteristics ?? []
+        controlCharacteristic54 = allCharacteristics54.first(where: { $0.uuid == controlUUID })
+        let notifyCharacteristics = allCharacteristics54.filter {
             $0.properties.contains(.notify) || $0.properties.contains(.indicate)
         }
 
@@ -2888,8 +2916,87 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         publish("Notify aktiv; warte auf Dexcom-Auth…")
     }
 
+
+    private func appendUInt32LE54(_ value: UInt32, to data: inout Data) {
+        data.append(UInt8(truncatingIfNeeded: value))
+        data.append(UInt8(truncatingIfNeeded: value >> 8))
+        data.append(UInt8(truncatingIfNeeded: value >> 16))
+        data.append(UInt8(truncatingIfNeeded: value >> 24))
+    }
+
+    private func requestBackfill54(current: DirectG7Reading, missingCount: Int, peripheral: CBPeripheral) {
+        guard missingCount > 0, missingCount <= 36 else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=range")
+            return
+        }
+        guard authenticated else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=not-authenticated")
+            return
+        }
+        guard !backfillRequestInFlight54 else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=in-flight")
+            return
+        }
+        guard let activation = sensorActivationDate52,
+              let control = controlCharacteristic54 else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=no-control-or-activation")
+            return
+        }
+        guard peripheral.identifier == targetPeripheral?.identifier else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=wrong-peer")
+            return
+        }
+
+        let relative = current.date.timeIntervalSince(activation)
+        guard relative > 300, relative < Double(UInt32.max) else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=timestamp")
+            return
+        }
+
+        let currentTimestamp = UInt32(relative.rounded())
+        let missingSeconds = UInt32(missingCount * 300)
+        guard currentTimestamp > missingSeconds else { return }
+
+        let firstMissing = currentTimestamp - missingSeconds
+        let lastMissing = currentTimestamp - 300
+        let startTime = firstMissing > 90 ? firstMissing - 90 : 0
+        let endTime = min(currentTimestamp - 30, lastMissing + 90)
+        guard endTime >= startTime else { return }
+
+        var command = Data([0x59])
+        appendUInt32LE54(startTime, to: &command)
+        appendUInt32LE54(endTime, to: &command)
+
+        let writeType: CBCharacteristicWriteType
+        if control.properties.contains(.write) {
+            writeType = .withResponse
+        } else if control.properties.contains(.writeWithoutResponse) {
+            writeType = .withoutResponse
+        } else {
+            trace41("BACKFILL_REQUEST54 skipped gap=\(missingCount) reason=control-not-writable")
+            return
+        }
+
+        backfillRequestInFlight54 = true
+        backfillBuffer52.removeAll(keepingCapacity: true)
+        peripheral.writeValue(command, for: control, type: writeType)
+        trace41("BACKFILL_REQUEST54 gap=\(missingCount) start=\(startTime) end=\(endTime) bytes=\(command.count)")
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         trace41("NOTIFY \(characteristic.uuid.uuidString.suffix(4)) on=\(characteristic.isNotifying) err=\(error?.localizedDescription ?? "nil")")
+        if let cbError = error as? CBError {
+            if #available(watchOS 9.0, *) {
+                switch cbError.code {
+                case .leGattNearBackgroundNotificationLimit:
+                    trace41("BLE_BUDGET54 leGattNearBackgroundNotificationLimit")
+                case .leGattExceededBackgroundNotificationLimit:
+                    trace41("BLE_BUDGET54 leGattExceededBackgroundNotificationLimit")
+                default:
+                    break
+                }
+            }
+        }
         if let error {
             publish("Notify-Fehler: \(error.localizedDescription)")
         }
@@ -2919,6 +3026,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
         }
 
         if characteristic.uuid == controlUUID, value[0] == 0x59 {
+            backfillRequestInFlight54 = false
             if sensorActivationDate52 == nil, !deferredBackfillFrames53.isEmpty {
                 deferredBackfillFinished53 = true
                 trace41("BACKFILL_FINISHED deferred count=\(deferredBackfillFrames53.count)")
@@ -2989,6 +3097,7 @@ private final class G7DirectBLEManager: NSObject, CBCentralManagerDelegate, CBPe
                 let gap = (Int(reading.sequence) - Int(expected) + 65536) % 65536
                 if gap > 0 && gap < 100 {
                     trace41("MISSED_SEQ expected=\(expected) received=\(reading.sequence) count=\(gap)")
+                    requestBackfill54(current: reading, missingCount: gap, peripheral: peripheral)
                 }
             }
         }
