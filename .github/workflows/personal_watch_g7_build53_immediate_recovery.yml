@@ -1,0 +1,163 @@
+name: Personal xDrip G7 Watch Build 53
+run-name: G7 Watch Build 53 Immediate Recovery (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build53_immediate_recovery.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build G7 Watch Build 53
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout workflow source
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Preserve Build 53 patch script
+        run: cp '.github/scripts/apply_g7_watch_build53_immediate_recovery.py' /tmp/apply_g7_watch_build53_immediate_recovery.py
+
+      - name: Checkout Build 52 baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build52-gapless-direct
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Freeze completed widget UI and iPhone transport
+        run: |
+          set -euo pipefail
+          for f in \
+            'xDrip Watch App/Views/BigNumberView/BigNumberView.swift' \
+            'xDrip Watch App/Views/RootView.swift' \
+            'xDrip Watch App/xDripWatchApp.swift' \
+            'xDrip Watch Complication/XDripWatchComplication+Provider.swift' \
+            'xDrip Watch Complication/XDripWatchComplication.swift' \
+            'xDrip Watch Complication/Views/AccessoryRectangularView.swift' \
+            'xDrip Watch Complication/Views/AccessoryCircularView.swift' \
+            'xDrip/Managers/Watch/WatchManager.swift' \
+            'xDrip-Watch-App-Info.plist' \
+            'xDrip/xDrip.xcconfig' \
+            'xDrip/Supporting Files/Info.plist'; do
+            shasum -a 256 "$f" >> /tmp/build53-frozen.sha
+          done
+
+      - name: Apply Build 53 immediate recovery
+        run: python3 /tmp/apply_g7_watch_build53_immediate_recovery.py
+
+      - name: Verify Build 53 continuity and Dexcom isolation
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c /tmp/build53-frozen.sha
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          for token in [
+              'DIRECT_G7', 'CORE_BLUETOOTH_0x4E', 'bgIngressTraceKey51',
+              'backfillUUID', 'CORE_BLUETOOTH_BACKFILL_3536',
+              'GAP_RECOVERY_ARMED_IMMEDIATE', 'connection-event-peerDisconnected',
+              'deferredBackfillFrames53', 'MISSED_SEQ', 'BACKFILL_WRITE',
+              'scanForPeripherals(', 'withServices: [advertisementUUID]',
+              'CBConnectPeripheralOptionEnableAutoReconnect: true',
+              'WidgetCenter.shared.reloadAllTimelines()',
+              'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36'
+          ]:
+              assert token in s, token
+          m = s.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          assert 'Thread.sleep(forTimeInterval: 2.0)' not in m
+          assert 'B50_BOND' not in m
+          assert 'writeValue(Data([0x06' not in m
+          assert 'writeValue(Data([0x07' not in m
+          assert 'requestBond' not in m
+          print('Build 53 immediate wake/recovery and Dexcom isolation contract verified.')
+          PY
+          changed="$(git diff --name-only | sort)"
+          expected="xDrip Watch App/DataModels/WatchStateModel.swift"
+          test "$changed" = "$expected"
+          git diff --check
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged Watch app extension and preserved name
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build53-ipa && mkdir -p /tmp/xdrip-build53-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build53-ipa
+          APP="$(find /tmp/xdrip-build53-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
+          python3 - "$APP/Info.plist" "$WATCH_APP/Info.plist" <<'PY'
+          import plistlib, sys
+          expected = "Martin\u2018s xDrip"
+          with open(sys.argv[1], 'rb') as f: phone = plistlib.load(f)
+          with open(sys.argv[2], 'rb') as f: watch = plistlib.load(f)
+          assert phone.get('CFBundleDisplayName') == expected, phone.get('CFBundleDisplayName')
+          assert watch.get('CFBundleDisplayName') == expected, watch.get('CFBundleDisplayName')
+          print('Build53 packaged app names preserved:', expected)
+          PY
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 53 additive baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build53-immediate-recovery
+          git add 'xDrip Watch App/DataModels/WatchStateModel.swift'
+          git commit -m 'Build 53: arm G7 recovery scan immediately in BLE callbacks'
+          git push origin HEAD:refs/heads/watch-build53-immediate-recovery --force
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build53-immediate-recovery-artifacts
+          path: |
+            artifacts
+            buildlog
