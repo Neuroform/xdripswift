@@ -1,33 +1,29 @@
 from pathlib import Path
 
-# Build54 patch revision 2. The architecture patch is intentionally kept unchanged;
-# this wrapper only replaces two brittle source-code anchors with structural lookups
+# Build54 patch revision 3. Keep the architecture patch itself unchanged.
+# This wrapper replaces the remaining brittle source anchors with structural lookups
 # before executing the patch against the materialized Build53 baseline.
 legacy_path = Path("/tmp/apply_g7_watch_build54_btcentral_backfill.py")
 source = legacy_path.read_text(encoding="utf-8")
 
 # Replace the brittle exact-string insertion in the modern CoreBluetooth disconnect callback.
+# Anchor on the unique productive trace line rather than whitespace/signature formatting.
 label = '"modern disconnect reset"'
 label_pos = source.index(label)
 block_start = source.rfind("replace_once(", 0, label_pos)
 block_end = source.index("\n)\n", label_pos) + len("\n)\n")
-modern_replacement = r'''modern_signature54 = (
-    "    func centralManager(_ central: CBCentralManager,\n"
-    "                    didDisconnectPeripheral peripheral: CBPeripheral,\n"
-    "                    timestamp:"
-)
-modern_start54 = manager.find(modern_signature54)
-if modern_start54 < 0:
-    raise RuntimeError("modern disconnect reset: callback signature not found")
-modern_brace54 = manager.find("{", modern_start54)
-if modern_brace54 < 0:
-    raise RuntimeError("modern disconnect reset: opening brace not found")
+modern_replacement = r'''modern_anchor54 = 'trace41("DISCONNECT_AUTO'
+if manager.count(modern_anchor54) != 1:
+    raise RuntimeError(f"modern disconnect reset: expected one DISCONNECT_AUTO anchor, found {manager.count(modern_anchor54)}")
+modern_pos54 = manager.index(modern_anchor54)
+modern_line_start54 = manager.rfind("\n", 0, modern_pos54) + 1
+modern_indent54 = manager[modern_line_start54:modern_pos54]
 manager = (
-    manager[:modern_brace54 + 1]
-    + "\n        connectPending54 = false\n"
-      "        backfillRequestInFlight54 = false\n"
-      "        controlCharacteristic54 = nil"
-    + manager[modern_brace54 + 1:]
+    manager[:modern_line_start54]
+    + modern_indent54 + "connectPending54 = false\n"
+    + modern_indent54 + "backfillRequestInFlight54 = false\n"
+    + modern_indent54 + "controlCharacteristic54 = nil\n"
+    + manager[modern_line_start54:]
 )
 '''
 source = source[:block_start] + modern_replacement + source[block_end:]
@@ -50,7 +46,7 @@ manager = (
 '''
 source = source[:section_start] + gap_replacement + source[section_end:]
 
-compiled_path = "/tmp/apply_g7_watch_build54_btcentral_backfill_compiled_v2.py"
+compiled_path = "/tmp/apply_g7_watch_build54_btcentral_backfill_compiled_v3.py"
 Path(compiled_path).write_text(source, encoding="utf-8")
 compile(source, compiled_path, "exec")
 exec(compile(source, compiled_path, "exec"), {"__name__": "__main__", "__file__": compiled_path})
