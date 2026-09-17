@@ -4,7 +4,10 @@ run-name: G7 Watch Build 54 bt.central + Backfill (${{ github.ref_name }})
 on:
   push:
     branches: [master]
-    paths: ['.github/workflows/personal_watch_g7_build54_btcentral_backfill.yml']
+    paths:
+      - '.github/workflows/personal_watch_g7_build54_btcentral_backfill.yml'
+      - '.github/scripts/apply_g7_watch_build54_btcentral_backfill.py'
+      - '.github/scripts/apply_g7_watch_build54_btcentral_backfill_v2.py'
   workflow_dispatch:
 
 jobs:
