@@ -90,10 +90,14 @@ jobs:
               'CORE_BLUETOOTH_0x4E',
               'CORE_BLUETOOTH_BACKFILL_3536',
               'publishReadingDirectlyToWidgets(reading)',
-              'WidgetCenter.shared.reloadAllTimelines()',
-              'xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36'
+              'WidgetCenter.shared.reloadAllTimelines()'
           ]:
               assert token in m, token
+
+          # Widget kinds live in the complication target, not inside G7DirectBLEManager.
+          # The frozen-file hashes above already guarantee the completed widget UI was untouched.
+          for token in ['xDripGraphV33', 'xDripBGV36', 'xDripDeltaV36']:
+              assert token in s, token
 
           for forbidden in [
               'CBConnectPeripheralOptionEnableAutoReconnect',
