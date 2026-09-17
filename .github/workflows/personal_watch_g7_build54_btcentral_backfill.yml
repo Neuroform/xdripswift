@@ -28,10 +28,12 @@ jobs:
         with:
           token: ${{ secrets.GH_PAT }}
 
-      - name: Preserve Build 54 patch script
+      - name: Preserve Build 54 patch scripts
         run: |
           cp '.github/scripts/apply_g7_watch_build54_btcentral_backfill.py' /tmp/apply_g7_watch_build54_btcentral_backfill.py
+          cp '.github/scripts/apply_g7_watch_build54_btcentral_backfill_v2.py' /tmp/apply_g7_watch_build54_btcentral_backfill_v2.py
           python3 -m py_compile /tmp/apply_g7_watch_build54_btcentral_backfill.py
+          python3 -m py_compile /tmp/apply_g7_watch_build54_btcentral_backfill_v2.py
 
       - name: Checkout Build 53 baseline
         uses: actions/checkout@v5
@@ -60,7 +62,7 @@ jobs:
           done
 
       - name: Apply Build 54 bt.central architecture
-        run: python3 /tmp/apply_g7_watch_build54_btcentral_backfill.py
+        run: python3 /tmp/apply_g7_watch_build54_btcentral_backfill_v2.py
 
       - name: Verify Build 54 architecture and frozen UI
         run: |
@@ -101,7 +103,7 @@ jobs:
               assert forbidden not in m, forbidden
 
           assert 'central.connect(known, options: nil)' in m
-          assert 'withServices: [advertisementUUID]' in m  # fallback discovery remains available
+          assert 'withServices: [advertisementUUID]' in m
           print('Build54 verified: serial bt.central, one known peer, targeted backfill, frozen widgets.')
           PY
           changed="$(git diff --name-only | sort)"
