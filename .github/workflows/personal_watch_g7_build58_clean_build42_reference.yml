@@ -1,0 +1,131 @@
+name: Personal xDrip G7 Watch Build 58
+run-name: G7 Watch Build 58 Clean Build42 Reference (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_watch_g7_build58_clean_build42_reference.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build 58 Clean Build42 Reference
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout exact Build 42 functional baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build42-functional-baseline
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Verify exact reference and assign new TestFlight build number
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "da79d3e3e29013ae4ff408e54a91c5830d41647c"
+          test "$(git status --porcelain)" = ""
+          grep -q '^XDRIP_MARKETING_VERSION = 7.0.0$' xDrip/Version.xcconfig
+          grep -q '^CURRENT_PROJECT_VERSION = 4231$' xDrip/Version.xcconfig
+          sed -i '' 's/^CURRENT_PROJECT_VERSION = 4231$/CURRENT_PROJECT_VERSION = 4258/' xDrip/Version.xcconfig
+          test "$(git diff --name-only)" = "xDrip/Version.xcconfig"
+          git diff --check
+          echo "Build 58 is exact Build42 source plus build-number-only change 4231 -> 4258."
+
+      - name: Verify frozen Build42 functional contract
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          plist = Path('xDrip-Watch-App-Info.plist').read_text(encoding='utf-8')
+          for token in [
+              'directG7Manager = G7DirectBLEManager(',
+              'directG7Manager?.start()',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"',
+              'processDirectG7Reading(reading)',
+              'updateComplicationData()',
+          ]:
+              assert token in state, token
+          manager = state.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          assert 'writeValue(' not in manager
+          assert 'requestBond' not in manager
+          assert '<string>bluetooth-central</string>' in plist
+          print('Build42 runtime source contract frozen; no bond/pairing writes.')
+          PY
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged iPhone app Watch app and WidgetKit extension
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build58-ipa && mkdir -p /tmp/xdrip-build58-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build58-ipa
+          APP="$(find /tmp/xdrip-build58-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = '4258'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
+          codesign --verify --deep --strict "$APP"
+          echo 'Build58 packaged iPhone app, Watch app and WidgetKit extension verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 58 reference baseline
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build58-clean-build42-reference
+          git add xDrip/Version.xcconfig
+          git commit -m 'Build 58: exact Build42 functional reference with new build number'
+          git push origin HEAD:refs/heads/watch-build58-clean-build42-reference --force
+          echo 'Build58 reference baseline published.'
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-watch-g7-build58-clean-build42-reference-artifacts
+          path: |
+            artifacts
+            buildlog
