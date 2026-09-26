@@ -295,7 +295,9 @@ jobs:
           WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
           EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
           test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = '4259'
+          ACTUAL_BUILD="$("/usr/libexec/PlistBuddy" -c 'Print :CFBundleVersion' "$APP/Info.plist")"
+          echo "Packaged CFBundleVersion=$ACTUAL_BUILD"
+          test "$ACTUAL_BUILD" = '59'
           test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
           /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
           codesign --verify --deep --strict "$APP"
