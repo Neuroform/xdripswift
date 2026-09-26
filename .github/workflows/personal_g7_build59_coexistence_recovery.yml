@@ -52,26 +52,18 @@ jobs:
 
           # 1) Let G7 request duplicate advertisements while waiting for the Dexcom-owned
           # system connection. Other Bluetooth transmitters keep the original scan behavior.
-          old = """    func shouldTimeoutStalledConnectionSetup() -> Bool {
-              false
-          }
-
-          /// gets peripheral connection status, nil if peripheral not existing yet
-          """
-          new = """    func shouldTimeoutStalledConnectionSetup() -> Bool {
-              false
-          }
-
-          /// Subclasses can request duplicate advertisements when their connection decision depends
+          scan_hook = "    /// gets peripheral connection status, nil if peripheral existing yet"
+          if scan_hook not in base:
+              scan_hook = "    /// gets peripheral connection status, nil if peripheral not existing yet"
+          assert base.count(scan_hook) == 1, "base connection-status marker changed"
+          scan_options = """    /// Subclasses can request duplicate advertisements when their connection decision depends
           /// on live system state. The default preserves the Build42 behavior for every other device.
           func scanOptions() -> [String: Any]? {
               nil
           }
 
-          /// gets peripheral connection status, nil if peripheral not existing yet
           """
-          assert base.count(old) == 1, "base scanOptions insertion point changed"
-          base = base.replace(old, new, 1)
+          base = base.replace(scan_hook, scan_options + scan_hook, 1)
 
           old_scan = "centralManager.scanForPeripherals(withServices: services, options: nil)"
           assert base.count(old_scan) == 1, "base scan call changed"
