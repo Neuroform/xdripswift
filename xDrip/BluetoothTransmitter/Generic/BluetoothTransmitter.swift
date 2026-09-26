@@ -243,6 +243,12 @@ class BluetoothTransmitter: NSObject, CBCentralManagerDelegate, CBPeripheralDele
         false
     }
 
+    /// Subclasses can request duplicate advertisements when their connection decision depends
+/// on live system state. The default preserves the Build42 behavior for every other device.
+func scanOptions() -> [String: Any]? {
+    nil
+}
+
     /// gets peripheral connection status, nil if peripheral not existing yet
     func getConnectionStatus() -> CBPeripheralState? {
         return peripheral?.state
@@ -355,7 +361,7 @@ class BluetoothTransmitter: NSObject, CBCentralManagerDelegate, CBPeripheralDele
                 case .poweredOn:
                     
                     trace("in startScanning, state is poweredOn", log: log, category: ConstantsLog.categoryBlueToothTransmitter, type: .info, troubleshooting: .detailed(.bluetooth(.scanning)))
-                    centralManager.scanForPeripherals(withServices: services, options: nil)
+                    centralManager.scanForPeripherals(withServices: services, options: scanOptions())
                     returnValue = .success
                     
                 case .poweredOff:

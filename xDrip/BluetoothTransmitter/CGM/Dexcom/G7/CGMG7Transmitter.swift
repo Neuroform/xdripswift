@@ -188,29 +188,32 @@ class CGMG7Transmitter: BluetoothTransmitter, CGMTransmitter {
 
     // MARK: - BluetoothTransmitter overriden functions
 
-    // Intercept BluetoothTransmitter's discovery logic to softly avoid auto-connecting the previous transmitter in new-device discovery mode,
-    // while still allowing fallback to the active transmitter after a discovery window.
-    override func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        let discoveredName = peripheral.name ?? "nil"
-        trace("Did discover peripheral with name: %{public}@", log: self.log, category: ConstantsLog.categoryCGMG7, type: .info, discoveredName)
-
-        // If we are not in new-device discovery anymore, use the base behaviour directly.
-        guard isNewDeviceDiscovery else {
-            super.centralManager(central, didDiscover: peripheral, advertisementData: advertisementData, rssi: RSSI)
-            return
-        }
-
-        // In new-device discovery, perform a one-shot soft skip of the active transmitter id if found.
-        // This will only happen if we're not looking for a specific transmitter ID passed in by the user from the view controller
-        if transmitterId == nil, let name = peripheral.name, name.hasPrefix("DX"), let activeId = UserDefaults.standard.activeSensorTransmitterId, avoidActiveTransmitterIdDuringDiscovery, name == activeId {
-            trace("    one-shot skip of active transmitter id (%{public}@) during new sensor discovery", log: self.log, category: ConstantsLog.categoryCGMG7, type: .info, activeId)
-            avoidActiveTransmitterIdDuringDiscovery = false
-            return
-        }
-
-        // Default behaviour: allow BluetoothTransmitter to apply its normal selection logic.
-        super.centralManager(central, didDiscover: peripheral, advertisementData: advertisementData, rssi: RSSI)
+/// Build42 G7 is coexistence-only: the Dexcom app owns authentication. First attach to
+/// the system-connected G7; otherwise observe advertisements until that connection exists.
+override func connect() {
+    if !retrieveConnectedPeripheral(withServiceUUIDs: [CBUUID(string: CBUUID_Service_G7)]) {
+        _ = startScanning()
     }
+}
+
+/// Re-check the live system-connected list on every foreground advertisement while
+/// initial coexistence attachment is still pending.
+override func scanOptions() -> [String: Any]? {
+    [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+}
+
+
+    // In coexistence an advertisement is only a wake signal. Connecting to that advertising
+// instance directly can race the official Dexcom app. Instead attach to the peripheral
+// that iOS reports as already connected by the Dexcom app.
+override func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+    let discoveredName = peripheral.name ?? "nil"
+    trace("Did discover peripheral with name: %{public}@", log: self.log, category: ConstantsLog.categoryCGMG7, type: .info, discoveredName)
+
+    if retrieveConnectedPeripheral(withServiceUUIDs: [CBUUID(string: CBUUID_Service_G7)]) {
+        trace("G7 coexistence attached to Dexcom app connection", log: self.log, category: ConstantsLog.categoryCGMG7, type: .info)
+    }
+}
 
     override func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         super.centralManager(central, didDisconnectPeripheral: peripheral, error: error)
@@ -340,6 +343,12 @@ class CGMG7Transmitter: BluetoothTransmitter, CGMTransmitter {
                 // Update last delivered timestamp
                 self.timeStampLastReading = g7GlucoseMessage.timeStamp
 
+        if let backfillCharacteristic = self.backfillCharacteristic,
+           !backfillCharacteristic.isNotifying {
+            trace("G7 coexistence glucose received. Arming Backfill", log: log, category: ConstantsLog.categoryCGMG7, type: .info)
+            setNotifyValue(true, for: backfillCharacteristic)
+        }
+
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
 
@@ -412,6 +421,12 @@ class CGMG7Transmitter: BluetoothTransmitter, CGMTransmitter {
 
                     trace("    connected to Dexcom G7/ONE+ that is paired and authenticated by other app. Will stay connected to this one.", log: log, category: ConstantsLog.categoryCGMG7, type: .info )
                     self.currentlyAuthenticatedDeviceName = self.deviceName
+
+            if let writeControlCharacteristic = self.writeControlCharacteristic,
+               !writeControlCharacteristic.isNotifying {
+                trace("G7 coexistence authenticated. Arming Write_Control", log: log, category: ConstantsLog.categoryCGMG7, type: .info)
+                setNotifyValue(true, for: writeControlCharacteristic)
+            }
                     
                     // when paired && authenticated:
                     if let authenticatedDeviceName = self.deviceName, authenticatedDeviceName.hasPrefix(transmitterId ?? "DX"), UserDefaults.standard.activeSensorTransmitterId != authenticatedDeviceName {
@@ -446,6 +461,7 @@ class CGMG7Transmitter: BluetoothTransmitter, CGMTransmitter {
     // override here didConnect, because we don't want to call bluetoothTransmitterDelegate?.didConnectTo(bluetoothTransmitter: self) which would be done if we don't override
     // bluetoothTransmitterDelegate?.didConnectTo(bluetoothTransmitter: self) will be called later when we're sure we're connected to the Dexcom that is currently used by the other app
     override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        central.stopScan()
         
         cancelConnectionTimer()
         
@@ -469,80 +485,60 @@ class CGMG7Transmitter: BluetoothTransmitter, CGMTransmitter {
     }
     
     override func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        trace("didDiscoverCharacteristicsFor for peripheral with name %{public}@, for service with uuid %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, deviceName ?? "'unknown'", String(describing:service.uuid))
+    trace("didDiscoverCharacteristicsFor for peripheral with name %{public}@, for service with uuid %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, deviceName ?? "'unknown'", String(describing: service.uuid))
 
-        if let error = error {
-            trace("    didDiscoverCharacteristicsFor error: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .error , error.localizedDescription)
-        }
-        
-        if let characteristics = service.characteristics {
-            for characteristic in characteristics {
-                trace("    characteristic: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, String(describing: characteristic.uuid))
-                
-                // Store references to discovered characteristics
-                if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Receive_Authentication.rawValue) {
-                    receiveAuthenticationCharacteristic = characteristic
-                } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
-                    writeControlCharacteristic = characteristic
-                } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Backfill.rawValue) {
-                    backfillCharacteristic = characteristic
-                } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Communication.rawValue) {
-                    communicationCharacteristic = characteristic
-                }
-                
-                // DEBUG
-                let have = [receiveAuthenticationCharacteristic != nil, writeControlCharacteristic != nil, backfillCharacteristic != nil, communicationCharacteristic != nil]
-                trace("G7 notify: discovered refs - auth: %{public}@, write: %{public}@, backfill: %{public}@, comm: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, String(have[0]), String(have[1]), String(have[2]), String(have[3]))
-                
-                // Subscribe to all relevant characteristics immediately (coexistence: read-only notifies)
-                if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Receive_Authentication.rawValue) {
-                    traceNotifyState(characteristic, label: "notify requested (we issued setNotifyValue)")
-                    if !characteristic.isNotifying { setNotifyValue(true, for: characteristic) }
-                } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
-                    traceNotifyState(characteristic, label: "notify requested (we issued setNotifyValue)")
-                    if !characteristic.isNotifying { setNotifyValue(true, for: characteristic) }
-                } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Backfill.rawValue) {
-                    traceNotifyState(characteristic, label: "notify requested (we issued setNotifyValue)")
-                    if !characteristic.isNotifying { setNotifyValue(true, for: characteristic) }
-                }
-            }
-        } else {
-            trace("    Did discover characteristics, but no characteristics listed. There must be some error.", log: log, category: ConstantsLog.categoryCGMG7, type: .error)
+    if let error = error {
+        trace("    didDiscoverCharacteristicsFor error: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .error, error.localizedDescription)
+        return
+    }
+
+    guard let characteristics = service.characteristics else {
+        trace("    Did discover characteristics, but no characteristics listed.", log: log, category: ConstantsLog.categoryCGMG7, type: .error)
+        return
+    }
+
+    for characteristic in characteristics {
+        trace("    characteristic: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, String(describing: characteristic.uuid))
+        if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Receive_Authentication.rawValue) {
+            receiveAuthenticationCharacteristic = characteristic
+        } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
+            writeControlCharacteristic = characteristic
+        } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Backfill.rawValue) {
+            backfillCharacteristic = characteristic
+        } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Communication.rawValue) {
+            communicationCharacteristic = characteristic
         }
     }
-    
+
+    let have = [receiveAuthenticationCharacteristic != nil, writeControlCharacteristic != nil, backfillCharacteristic != nil, communicationCharacteristic != nil]
+    trace("G7 notify: discovered refs - auth: %{public}@, write: %{public}@, backfill: %{public}@, comm: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, String(have[0]), String(have[1]), String(have[2]), String(have[3]))
+
+    // Coexistence observes Dexcom authentication first. Protected data characteristics
+    // are armed only after paired+authenticated is reported by that session.
+    if let receiveAuthenticationCharacteristic = receiveAuthenticationCharacteristic,
+       !receiveAuthenticationCharacteristic.isNotifying {
+        traceNotifyState(receiveAuthenticationCharacteristic, label: "coexistence auth notify requested")
+        setNotifyValue(true, for: receiveAuthenticationCharacteristic)
+    }
+}
+
     override func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        
-        // DEBUG
-        if error == nil {
-            // move Write_Control confirmation to .info. Others remain .debug
-            if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
-                let name = "Write_Control"
-                trace("G7 notify: %{public}@ - %{public}@ isNotifying = %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .info, "notify state updated (CoreBluetooth confirmed)", name, String(characteristic.isNotifying))
-            } else {
-                traceNotifyState(characteristic, label: "notify state updated (CoreBluetooth confirmed)")
-            }
+    if let error = error {
+        if error.localizedDescription.contains(find: "Encryption is insufficient") {
+            trace("G7 coexistence is waiting for Dexcom authentication for %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .info, String(describing: characteristic.uuid))
+        } else {
+            trace("G7 notification update failed for %{public}@: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .error, String(describing: characteristic.uuid), error.localizedDescription)
         }
-        
-        if let error = error, error.localizedDescription.contains(find: "Encryption is insufficient") {
-            trace("didUpdateNotificationStateFor: transient auth state (Encryption is insufficient) for %{public}@, characteristic %{public}@. Coexistence: disconnect only, no forget.",
-                  log: log, category: ConstantsLog.categoryCGMG7, type: .info,
-                  (deviceName != nil ? deviceName! : "unknown"), String(describing: characteristic.uuid))
-
-            // Deliver any pending readings/backfill before disconnecting
-            flushBackfillDeliveringToDelegate()
-
-            // Schedule a one-shot temporary rejection for this device name to prevent immediate reconnect loop
-            if let dxName = deviceName {
-                scheduleTemporaryRejectionOnNextDisconnect(forDeviceName: dxName)
-            }
-            
-            // Coexistence: do NOT forget. Allow quick retry without blacklisting the peripheral
-            disconnect()
-        }
-        
+        return
     }
-    
+
+    if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
+        trace("G7 notify: CoreBluetooth confirmed Write_Control isNotifying=%{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .info, String(characteristic.isNotifying))
+    } else {
+        traceNotifyState(characteristic, label: "notify state updated")
+    }
+}
+
     // MARK: - CGMTransmitter protocol functions
     
     func cgmTransmitterType() -> CGMTransmitterType {
