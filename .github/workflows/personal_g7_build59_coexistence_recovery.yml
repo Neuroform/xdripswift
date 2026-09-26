@@ -1,0 +1,362 @@
+name: Personal xDrip G7 Build 59 Coexistence Recovery
+run-name: G7 Build 59 Build42 + Coexistence Recovery (${{ github.ref_name }})
+
+on:
+  push:
+    branches: [master]
+    paths: ['.github/workflows/personal_g7_build59_coexistence_recovery.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build 59 Coexistence Recovery
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout exact Build 42 functional baseline
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          ref: watch-build42-functional-baseline
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Verify exact baseline
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "da79d3e3e29013ae4ff408e54a91c5830d41647c"
+          test "$(git status --porcelain)" = ""
+          grep -q '^XDRIP_MARKETING_VERSION = 7.0.0$' xDrip/Version.xcconfig
+          grep -q '^CURRENT_PROJECT_VERSION = 4231$' xDrip/Version.xcconfig
+
+      - name: Apply isolated iPhone G7 coexistence recovery
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          base_path = Path("xDrip/BluetoothTransmitter/Generic/BluetoothTransmitter.swift")
+          g7_path = Path("xDrip/BluetoothTransmitter/CGM/Dexcom/G7/CGMG7Transmitter.swift")
+
+          base = base_path.read_text(encoding="utf-8")
+          g7 = g7_path.read_text(encoding="utf-8")
+
+          # 1) Let G7 request duplicate advertisements while waiting for the Dexcom-owned
+          # system connection. Other Bluetooth transmitters keep the original scan behavior.
+          old = """    func shouldTimeoutStalledConnectionSetup() -> Bool {
+              false
+          }
+
+          /// gets peripheral connection status, nil if peripheral not existing yet
+          """
+          new = """    func shouldTimeoutStalledConnectionSetup() -> Bool {
+              false
+          }
+
+          /// Subclasses can request duplicate advertisements when their connection decision depends
+          /// on live system state. The default preserves the Build42 behavior for every other device.
+          func scanOptions() -> [String: Any]? {
+              nil
+          }
+
+          /// gets peripheral connection status, nil if peripheral not existing yet
+          """
+          assert base.count(old) == 1, "base scanOptions insertion point changed"
+          base = base.replace(old, new, 1)
+
+          old_scan = "centralManager.scanForPeripherals(withServices: services, options: nil)"
+          assert base.count(old_scan) == 1, "base scan call changed"
+          base = base.replace(
+              old_scan,
+              "centralManager.scanForPeripherals(withServices: services, options: scanOptions())",
+              1,
+          )
+
+          # 2) Build42 G7 is coexistence-only. Never claim the advertising peripheral directly.
+          # Attach to the G7 already connected by the official Dexcom app. Duplicate advertisements
+          # are only wake signals that repeat the system-connected lookup.
+          marker = "    // MARK: - BluetoothTransmitter overriden functions\n"
+          assert g7.count(marker) == 1, "G7 Bluetooth override marker changed"
+          insert = """    // MARK: - BluetoothTransmitter overriden functions
+
+          /// Build42 G7 is coexistence-only: the Dexcom app owns authentication. First attach to
+          /// the system-connected G7; otherwise observe advertisements until that connection exists.
+          override func connect() {
+              if !retrieveConnectedPeripheral(withServiceUUIDs: [CBUUID(string: CBUUID_Service_G7)]) {
+                  _ = startScanning()
+              }
+          }
+
+          /// Re-check the live system-connected list on every foreground advertisement while
+          /// initial coexistence attachment is still pending.
+          override func scanOptions() -> [String: Any]? {
+              [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+          }
+
+          """
+          g7 = g7.replace(marker, insert, 1)
+
+          start = g7.index("    // Intercept BluetoothTransmitter's discovery logic")
+          end = g7.index("    override func centralManager(_ central: CBCentralManager, didDisconnectPeripheral", start)
+          discovery = """    // In coexistence an advertisement is only a wake signal. Connecting to that advertising
+          // instance directly can race the official Dexcom app. Instead attach to the peripheral
+          // that iOS reports as already connected by the Dexcom app.
+          override func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+              let discoveredName = peripheral.name ?? "nil"
+              trace("Did discover peripheral with name: %{public}@", log: self.log, category: ConstantsLog.categoryCGMG7, type: .info, discoveredName)
+
+              if retrieveConnectedPeripheral(withServiceUUIDs: [CBUUID(string: CBUUID_Service_G7)]) {
+                  trace("G7 coexistence attached to Dexcom app connection", log: self.log, category: ConstantsLog.categoryCGMG7, type: .info)
+              }
+          }
+
+          """
+          g7 = g7[:start] + discovery + g7[end:]
+
+          # Stop a discovery scan as soon as the known/system-connected peripheral is attached.
+          old_connect = """    override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+              
+              cancelConnectionTimer()
+          """
+          new_connect = """    override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+              
+              central.stopScan()
+              cancelConnectionTimer()
+          """
+          assert g7.count(old_connect) == 1, "G7 didConnect insertion point changed"
+          g7 = g7.replace(old_connect, new_connect, 1)
+
+          # 3) Do not arm encrypted control/backfill characteristics before the Dexcom-owned
+          # authentication is visible. This prevents the old Build42 encryption-insufficient
+          # disconnect/reject loop.
+          start = g7.index("    override func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?)")
+          end = g7.index("    override func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?)", start)
+          discovered = """    override func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+              trace("didDiscoverCharacteristicsFor for peripheral with name %{public}@, for service with uuid %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, deviceName ?? "'unknown'", String(describing: service.uuid))
+
+              if let error = error {
+                  trace("    didDiscoverCharacteristicsFor error: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .error, error.localizedDescription)
+                  return
+              }
+
+              guard let characteristics = service.characteristics else {
+                  trace("    Did discover characteristics, but no characteristics listed.", log: log, category: ConstantsLog.categoryCGMG7, type: .error)
+                  return
+              }
+
+              for characteristic in characteristics {
+                  trace("    characteristic: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, String(describing: characteristic.uuid))
+                  if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Receive_Authentication.rawValue) {
+                      receiveAuthenticationCharacteristic = characteristic
+                  } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
+                      writeControlCharacteristic = characteristic
+                  } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Backfill.rawValue) {
+                      backfillCharacteristic = characteristic
+                  } else if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Communication.rawValue) {
+                      communicationCharacteristic = characteristic
+                  }
+              }
+
+              let have = [receiveAuthenticationCharacteristic != nil, writeControlCharacteristic != nil, backfillCharacteristic != nil, communicationCharacteristic != nil]
+              trace("G7 notify: discovered refs - auth: %{public}@, write: %{public}@, backfill: %{public}@, comm: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .debug, String(have[0]), String(have[1]), String(have[2]), String(have[3]))
+
+              // Coexistence observes Dexcom authentication first. Protected data characteristics
+              // are armed only after paired+authenticated is reported by that session.
+              if let receiveAuthenticationCharacteristic = receiveAuthenticationCharacteristic,
+                 !receiveAuthenticationCharacteristic.isNotifying {
+                  traceNotifyState(receiveAuthenticationCharacteristic, label: "coexistence auth notify requested")
+                  setNotifyValue(true, for: receiveAuthenticationCharacteristic)
+              }
+          }
+
+          """
+          g7 = g7[:start] + discovered + g7[end:]
+
+          # Treat encryption-insufficient as a transient coexistence state. Do not disconnect,
+          # blacklist or force a new scan; the official Dexcom app owns authentication.
+          start = g7.index("    override func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?)")
+          end = g7.index("    // MARK: - CGMTransmitter protocol functions", start)
+          notify = """    override func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+              if let error = error {
+                  if error.localizedDescription.contains(find: "Encryption is insufficient") {
+                      trace("G7 coexistence is waiting for Dexcom authentication for %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .info, String(describing: characteristic.uuid))
+                  } else {
+                      trace("G7 notification update failed for %{public}@: %{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .error, String(describing: characteristic.uuid), error.localizedDescription)
+                  }
+                  return
+              }
+
+              if characteristic.uuid == CBUUID(string: CBUUID_Characteristic_UUID.CBUUID_Write_Control.rawValue) {
+                  trace("G7 notify: CoreBluetooth confirmed Write_Control isNotifying=%{public}@", log: log, category: ConstantsLog.categoryCGMG7, type: .info, String(characteristic.isNotifying))
+              } else {
+                  traceNotifyState(characteristic, label: "notify state updated")
+              }
+          }
+
+          """
+          g7 = g7[:start] + notify + g7[end:]
+
+          # Once the Dexcom-owned session reports paired+authenticated, arm the passive glucose stream.
+          old_auth = """                    self.currentlyAuthenticatedDeviceName = self.deviceName
+                      
+                      // when paired && authenticated:
+          """
+          new_auth = """                    self.currentlyAuthenticatedDeviceName = self.deviceName
+
+                      if let writeControlCharacteristic = self.writeControlCharacteristic,
+                         !writeControlCharacteristic.isNotifying {
+                          trace("G7 coexistence authenticated. Arming Write_Control", log: log, category: ConstantsLog.categoryCGMG7, type: .info)
+                          setNotifyValue(true, for: writeControlCharacteristic)
+                      }
+                      
+                      // when paired && authenticated:
+          """
+          assert g7.count(old_auth) == 1, "G7 auth success insertion point changed"
+          g7 = g7.replace(old_auth, new_auth, 1)
+
+          # Backfill is protected as well. Arm it only after a valid live glucose packet proves
+          # the shared data stream is available.
+          old_live = """                // Update last delivered timestamp
+                  self.timeStampLastReading = g7GlucoseMessage.timeStamp
+
+                  DispatchQueue.main.async { [weak self] in
+          """
+          new_live = """                // Update last delivered timestamp
+                  self.timeStampLastReading = g7GlucoseMessage.timeStamp
+
+                  if let backfillCharacteristic = self.backfillCharacteristic,
+                     !backfillCharacteristic.isNotifying {
+                      trace("G7 coexistence glucose received. Arming Backfill", log: log, category: ConstantsLog.categoryCGMG7, type: .info)
+                      setNotifyValue(true, for: backfillCharacteristic)
+                  }
+
+                  DispatchQueue.main.async { [weak self] in
+          """
+          assert g7.count(old_live) == 1, "G7 live reading insertion point changed"
+          g7 = g7.replace(old_live, new_live, 1)
+
+          base_path.write_text(base, encoding="utf-8")
+          g7_path.write_text(g7, encoding="utf-8")
+          PY
+
+          sed -i '' 's/^CURRENT_PROJECT_VERSION = 4231$/CURRENT_PROJECT_VERSION = 4259/' xDrip/Version.xcconfig
+
+          python3 - <<'PY'
+          from pathlib import Path
+          base = Path("xDrip/BluetoothTransmitter/Generic/BluetoothTransmitter.swift").read_text(encoding="utf-8")
+          g7 = Path("xDrip/BluetoothTransmitter/CGM/Dexcom/G7/CGMG7Transmitter.swift").read_text(encoding="utf-8")
+          assert "options: scanOptions()" in base
+          for token in [
+              "override func connect()",
+              "CBCentralManagerScanOptionAllowDuplicatesKey",
+              "retrieveConnectedPeripheral(withServiceUUIDs: [CBUUID(string: CBUUID_Service_G7)])",
+              "G7 coexistence attached to Dexcom app connection",
+              "G7 coexistence authenticated. Arming Write_Control",
+              "G7 coexistence glucose received. Arming Backfill",
+              "G7 coexistence is waiting for Dexcom authentication",
+          ]:
+              assert token in g7, token
+          assert "scheduleTemporaryRejectionOnNextDisconnect" not in g7
+          print("Build59 isolated coexistence recovery patch verified.")
+          PY
+
+          git diff --check
+          printf '%s\n' "$(git diff --name-only)"
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n'             'xDrip/BluetoothTransmitter/CGM/Dexcom/G7/CGMG7Transmitter.swift'             'xDrip/BluetoothTransmitter/Generic/BluetoothTransmitter.swift'             'xDrip/Version.xcconfig' | sort)"
+
+      - name: Verify frozen Build42 Watch contract is untouched
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          state = Path('xDrip Watch App/DataModels/WatchStateModel.swift').read_text(encoding='utf-8')
+          plist = Path('xDrip-Watch-App-Info.plist').read_text(encoding='utf-8')
+          for token in [
+              'directG7Manager = G7DirectBLEManager(',
+              'directG7Manager?.start()',
+              'CBCentralManagerOptionRestoreIdentifierKey: "xDrip.G7.Direct.Central"',
+              'processDirectG7Reading(reading)',
+              'updateComplicationData()',
+          ]:
+              assert token in state, token
+          manager = state.split('// MARK: - Direct G7 BLE manager', 1)[1].split('// MARK: - WCSession delegate', 1)[0]
+          assert 'writeValue(' not in manager
+          assert 'requestBond' not in manager
+          assert '<string>bluetooth-central</string>' in plist
+          print('Build42 Watch/widgets remain byte-identical; only iPhone G7 coexistence BLE path changed.')
+          PY
+
+      - name: Patch Match Tables
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install Project Dependencies
+        run: bundle install
+
+      - name: Sync clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Fastlane Build and Archive
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify packaged app
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          rm -rf /tmp/xdrip-build59-ipa && mkdir -p /tmp/xdrip-build59-ipa
+          unzip -q "$IPA_PATH" -d /tmp/xdrip-build59-ipa
+          APP="$(find /tmp/xdrip-build59-ipa/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          WATCH_APP="$(find "$APP/Watch" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          EXT="$(find "$WATCH_APP/PlugIns" -name '*Watch Complication*.appex' -type d -print -quit)"
+          test -n "$APP" && test -n "$WATCH_APP" && test -n "$EXT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" = '4259'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$EXT/Info.plist")" = 'com.apple.widgetkit-extension'
+          /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes:0' "$WATCH_APP/Info.plist" | grep -qx 'bluetooth-central'
+          codesign --verify --deep --strict "$APP"
+          echo 'Build59 package verified.'
+
+      - name: Upload to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Publish Build 59 reference
+        run: |
+          set -euo pipefail
+          git config user.name 'Neuroform'
+          git config user.email '70688199+Neuroform@users.noreply.github.com'
+          git checkout -B watch-build59-build42-g7-coexistence-recovery
+          git add xDrip/Version.xcconfig                   xDrip/BluetoothTransmitter/Generic/BluetoothTransmitter.swift                   xDrip/BluetoothTransmitter/CGM/Dexcom/G7/CGMG7Transmitter.swift
+          git commit -m 'Build 59: recover G7 coexistence acquisition on Build42 baseline'
+          git push origin HEAD:refs/heads/watch-build59-build42-g7-coexistence-recovery --force
+          echo 'Build59 reference branch published.'
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: personal-g7-build59-coexistence-recovery-artifacts
+          path: |
+            artifacts
+            buildlog
