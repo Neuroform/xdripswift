@@ -115,17 +115,9 @@ jobs:
           g7 = g7[:start] + discovery + g7[end:]
 
           # Stop a discovery scan as soon as the known/system-connected peripheral is attached.
-          old_connect = """    override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-              
-              cancelConnectionTimer()
-          """
-          new_connect = """    override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-              
-              central.stopScan()
-              cancelConnectionTimer()
-          """
-          assert g7.count(old_connect) == 1, "G7 didConnect insertion point changed"
-          g7 = g7.replace(old_connect, new_connect, 1)
+          did_connect = "    override func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {\n"
+          assert g7.count(did_connect) == 1, "G7 didConnect signature changed"
+          g7 = g7.replace(did_connect, did_connect + "        central.stopScan()\n", 1)
 
           # 3) Do not arm encrypted control/backfill characteristics before the Dexcom-owned
           # authentication is visible. This prevents the old Build42 encryption-insufficient
@@ -198,43 +190,29 @@ jobs:
           g7 = g7[:start] + notify + g7[end:]
 
           # Once the Dexcom-owned session reports paired+authenticated, arm the passive glucose stream.
-          old_auth = """                    self.currentlyAuthenticatedDeviceName = self.deviceName
-                      
-                      // when paired && authenticated:
-          """
-          new_auth = """                    self.currentlyAuthenticatedDeviceName = self.deviceName
-
+          auth_anchor = "                    self.currentlyAuthenticatedDeviceName = self.deviceName\n"
+          assert g7.count(auth_anchor) == 1, "G7 auth success anchor changed"
+          auth_extra = """
                       if let writeControlCharacteristic = self.writeControlCharacteristic,
                          !writeControlCharacteristic.isNotifying {
                           trace("G7 coexistence authenticated. Arming Write_Control", log: log, category: ConstantsLog.categoryCGMG7, type: .info)
                           setNotifyValue(true, for: writeControlCharacteristic)
                       }
-                      
-                      // when paired && authenticated:
           """
-          assert g7.count(old_auth) == 1, "G7 auth success insertion point changed"
-          g7 = g7.replace(old_auth, new_auth, 1)
+          g7 = g7.replace(auth_anchor, auth_anchor + auth_extra, 1)
 
           # Backfill is protected as well. Arm it only after a valid live glucose packet proves
           # the shared data stream is available.
-          old_live = """                // Update last delivered timestamp
-                  self.timeStampLastReading = g7GlucoseMessage.timeStamp
-
-                  DispatchQueue.main.async { [weak self] in
-          """
-          new_live = """                // Update last delivered timestamp
-                  self.timeStampLastReading = g7GlucoseMessage.timeStamp
-
+          live_anchor = "                self.timeStampLastReading = g7GlucoseMessage.timeStamp\n"
+          assert g7.count(live_anchor) == 1, "G7 live reading anchor changed"
+          live_extra = """
                   if let backfillCharacteristic = self.backfillCharacteristic,
                      !backfillCharacteristic.isNotifying {
                       trace("G7 coexistence glucose received. Arming Backfill", log: log, category: ConstantsLog.categoryCGMG7, type: .info)
                       setNotifyValue(true, for: backfillCharacteristic)
                   }
-
-                  DispatchQueue.main.async { [weak self] in
           """
-          assert g7.count(old_live) == 1, "G7 live reading insertion point changed"
-          g7 = g7.replace(old_live, new_live, 1)
+          g7 = g7.replace(live_anchor, live_anchor + live_extra, 1)
 
           base_path.write_text(base, encoding="utf-8")
           g7_path.write_text(g7, encoding="utf-8")
