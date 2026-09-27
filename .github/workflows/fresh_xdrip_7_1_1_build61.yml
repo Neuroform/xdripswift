@@ -1,0 +1,214 @@
+name: Fresh xDrip 7.1.1 Build 61
+run-name: Fresh xDrip 7.1.1 Build 61 from pristine upstream
+
+on:
+  push:
+    branches: [clean-zero-upstream-7.1.1]
+    paths: ['.github/workflows/fresh_xdrip_7_1_1_build61.yml']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/validate_secrets.yml
+    secrets: inherit
+
+  build:
+    name: Build, upload and verify Build 61
+    needs: validate
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - name: Select Xcode version
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - name: Checkout pristine official upstream source
+        uses: actions/checkout@v5
+        with:
+          ref: c268542e64626c564e626658fa9a6b90a059ada4
+          submodules: recursive
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Verify pristine xDrip 7.1.1 source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "c268542e64626c564e626658fa9a6b90a059ada4"
+          test "$(git status --porcelain)" = ""
+          grep -q '^XDRIP_MARKETING_VERSION = 7.1.1$' xDrip/Version.xcconfig
+          grep -q '^CURRENT_PROJECT_VERSION = 4233$' xDrip/Version.xcconfig
+          echo "Pristine official xDrip 7.1.1 verified."
+
+      - name: Patch Match console table only
+        run: find /usr/local/lib/ruby/gems -name table_printer.rb | xargs sed -i "" "/puts(Terminal::Table.new(params))/d" || true
+
+      - name: Install project dependencies
+        run: bundle install
+
+      - name: Sync runner clock
+        run: sudo sntp -sS time.windows.com
+
+      - name: Build and archive pristine xDrip
+        run: bundle exec fastlane build_xdrip4ios
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify signed IPA before upload
+        run: |
+          set -euo pipefail
+          IPA="$(find artifacts . -maxdepth 2 -name 'Xdrip4iOS.ipa' -print -quit)"
+          test -n "$IPA"
+          rm -rf /tmp/xdrip-build61 && mkdir -p /tmp/xdrip-build61
+          unzip -q "$IPA" -d /tmp/xdrip-build61
+          APP="$(find /tmp/xdrip-build61/Payload -maxdepth 1 -name '*.app' -type d -print -quit)"
+          test -n "$APP"
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
+          echo "IPA version=$VERSION build=$BUILD"
+          test "$VERSION" = "7.1.1"
+          test "$BUILD" = "61"
+          codesign --verify --deep --strict "$APP"
+          echo "Signed Build 61 IPA verified."
+
+      - name: Upload Build 61 to TestFlight
+        run: bundle exec fastlane release
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+
+      - name: Verify Build 61 is actually available to internal TestFlight groups
+        env:
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, json, time, base64, urllib.request, urllib.parse, urllib.error, sys
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+          APP_ID = "6809078288"
+          REQUIRED_GROUPS = {
+              "9ab58b49-ef26-41e4-81b6-697293048ca6": "xDrip Personal",
+              "5606659b-11aa-4029-92d5-c69de1378bad": "xDrip Personal für ipad@gmx.at",
+          }
+
+          def b64url(b):
+              return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+
+          def make_token():
+              now = int(time.time())
+              header = {"alg":"ES256","kid":os.environ["FASTLANE_KEY_ID"],"typ":"JWT"}
+              payload = {"iss":os.environ["FASTLANE_ISSUER_ID"],"iat":now,"exp":now+900,"aud":"appstoreconnect-v1"}
+              h = b64url(json.dumps(header,separators=(',',':')).encode())
+              p = b64url(json.dumps(payload,separators=(',',':')).encode())
+              signing_input = f"{h}.{p}".encode()
+              key = serialization.load_pem_private_key(os.environ["FASTLANE_KEY"].encode(), password=None)
+              der = key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+              r,s = decode_dss_signature(der)
+              return f"{h}.{p}.{b64url(r.to_bytes(32,'big') + s.to_bytes(32,'big'))}"
+
+          def api(path, token):
+              req = urllib.request.Request(
+                  "https://api.appstoreconnect.apple.com" + path,
+                  headers={"Authorization":"Bearer "+token}
+              )
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.load(resp)
+
+          deadline = time.time() + 15*60
+          last = {}
+          while time.time() < deadline:
+              token = make_token()
+              params = {
+                  "filter[app]": APP_ID,
+                  "filter[version]": "61",
+                  "fields[builds]": "version,processingState,expired,uploadedDate",
+                  "limit": "20"
+              }
+              builds = api("/v1/builds?" + urllib.parse.urlencode(params), token)
+              if not builds.get("data"):
+                  print("Build 61 not visible in App Store Connect yet; waiting...")
+                  time.sleep(15)
+                  continue
+
+              build = builds["data"][0]
+              build_id = build["id"]
+              state = build["attributes"].get("processingState")
+              expired = build["attributes"].get("expired")
+              last["processingState"] = state
+              last["expired"] = expired
+
+              if state != "VALID" or expired:
+                  print(f"Build 61 processingState={state}, expired={expired}; waiting...")
+                  time.sleep(15)
+                  continue
+
+              beta = api(f"/v1/buildBetaDetails/{build_id}", token)
+              internal = beta["data"]["attributes"].get("internalBuildState")
+              last["internalBuildState"] = internal
+              if internal != "IN_BETA_TESTING":
+                  print(f"Build 61 internalBuildState={internal}; waiting...")
+                  time.sleep(15)
+                  continue
+
+              gp = {
+                  "filter[builds]": build_id,
+                  "fields[betaGroups]": "name,isInternalGroup",
+                  "limit": "200"
+              }
+              groups = api("/v1/betaGroups?" + urllib.parse.urlencode(gp), token)
+              present = {g["id"]: g["attributes"].get("name") for g in groups.get("data", [])}
+              last["groups"] = present
+              missing = [name for gid,name in REQUIRED_GROUPS.items() if gid not in present]
+              if missing:
+                  print("Build 61 valid but not yet assigned to all required internal groups:", missing)
+                  time.sleep(15)
+                  continue
+
+              tp = {
+                  "filter[apps]": APP_ID,
+                  "fields[betaTesters]": "firstName,lastName,email,state",
+                  "limit": "200"
+              }
+              testers = api("/v1/betaTesters?" + urllib.parse.urlencode(tp), token)
+              tester = next((x for x in testers.get("data", []) if x["attributes"].get("email","").lower()=="ipad@gmx.at"), None)
+              if tester is None:
+                  raise SystemExit("ipad@gmx.at is not registered as a TestFlight tester for this app.")
+              tester_state = tester["attributes"].get("state")
+              last["testerState"] = tester_state
+
+              print("BUILD61_TESTFLIGHT_VERIFIED")
+              print(json.dumps({
+                  "version": "7.1.1",
+                  "build": "61",
+                  "processingState": state,
+                  "internalBuildState": internal,
+                  "groups": present,
+                  "tester": {"email":"ipad@gmx.at","state":tester_state}
+              }, ensure_ascii=False, indent=2))
+              sys.exit(0)
+
+          print("Timed out waiting for Build 61 TestFlight availability:")
+          print(json.dumps(last, ensure_ascii=False, indent=2))
+          sys.exit(1)
+          PY
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fresh-xdrip-7.1.1-build61-artifacts
+          path: |
+            artifacts
+            buildlog
