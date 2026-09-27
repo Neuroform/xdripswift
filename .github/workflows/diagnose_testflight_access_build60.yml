@@ -1,0 +1,64 @@
+name: Diagnose TestFlight Access Build 60
+run-name: Diagnose TestFlight access for xDrip 7.1.1 Build 60
+
+on:
+  push:
+    branches: [clean-zero-upstream-7.1.1]
+    paths: ['.github/workflows/diagnose_testflight_access_build60.yml']
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: macos-26
+    steps:
+      - name: Query App Store Connect access state
+        env:
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, json, time, base64, urllib.request, urllib.parse, urllib.error
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+          APP_ID = "6809078288"
+          BUILD_ID = "62623deb-9d59-48a8-9b7b-670a54b42a7d"
+
+          def b64url(b):
+              return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+
+          now = int(time.time())
+          header = {"alg":"ES256","kid":os.environ["FASTLANE_KEY_ID"],"typ":"JWT"}
+          payload = {"iss":os.environ["FASTLANE_ISSUER_ID"],"iat":now,"exp":now+900,"aud":"appstoreconnect-v1"}
+          h = b64url(json.dumps(header,separators=(',',':')).encode())
+          p = b64url(json.dumps(payload,separators=(',',':')).encode())
+          signing_input = f"{h}.{p}".encode()
+          key = serialization.load_pem_private_key(os.environ["FASTLANE_KEY"].encode(), password=None)
+          der = key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+          r,s = decode_dss_signature(der)
+          token = f"{h}.{p}.{b64url(r.to_bytes(32,'big') + s.to_bytes(32,'big'))}"
+
+          def get(label, path):
+              url = "https://api.appstoreconnect.apple.com" + path
+              req = urllib.request.Request(url, headers={"Authorization":"Bearer "+token})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      body = json.load(resp)
+                  print("\n===", label, "HTTP", resp.status, "===")
+                  print(json.dumps(body, indent=2))
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode("utf-8", errors="replace")
+                  print("\n===", label, "HTTP", exc.code, "===")
+                  print(body)
+              except Exception as exc:
+                  print("\n===", label, "ERROR ===")
+                  print(repr(exc))
+
+          get("BUILD", f"/v1/builds/{BUILD_ID}?fields%5Bbuilds%5D=version,processingState,expired,uploadedDate,minOsVersion")
+          get("BETA_DETAIL", f"/v1/buildBetaDetails/{BUILD_ID}")
+          get("APP_BETA_GROUPS", f"/v1/betaGroups?filter%5Bapp%5D={APP_ID}&fields%5BbetaGroups%5D=name,isInternalGroup,publicLinkEnabled,publicLinkLimitEnabled,publicLinkLimit&limit=200")
+          get("BUILD_BETA_GROUPS", f"/v1/betaGroups?filter%5Bbuilds%5D={BUILD_ID}&fields%5BbetaGroups%5D=name,isInternalGroup,publicLinkEnabled&limit=200")
+          get("BETA_TESTERS_FOR_APP", f"/v1/betaTesters?filter%5Bapps%5D={APP_ID}&fields%5BbetaTesters%5D=firstName,lastName,email,state&limit=200")
+          PY
